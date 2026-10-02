@@ -406,6 +406,7 @@ fn write_diff_update(e: &mut BoolEncoder, old: u8, new: u8) {
     }
 }
 
+#[allow(clippy::needless_range_loop)]
 /// The coefficient probabilities worth updating, given how often each of
 /// the first three nodes of every context saw a 0 and a 1. A transform
 /// size's probabilities are updated together or not at all, as its
