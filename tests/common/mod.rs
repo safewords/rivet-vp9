@@ -35,7 +35,12 @@ fn walk(data: &[u8], out: &mut Vec<Vec<u8>>, track: &mut Option<u64>) {
         let Some((size, sl)) = vint(data, pos + il, false) else { return };
         let start = pos + il + sl;
         let unknown = size == (1u64 << (7 * sl)) - 1;
-        let end = if unknown { data.len() } else { (start + size as usize).min(data.len()) };
+        if !unknown && start + size as usize > data.len() {
+            // An element larger than its parent: the file is corrupt from
+            // here (vp90-2-15-fuzz-flicker.webm ends with one). Stop.
+            return;
+        }
+        let end = if unknown { data.len() } else { start + size as usize };
         match id {
             // Segment, Cluster, BlockGroup: descend.
             0x18538067 | 0x1F43B675 | 0xA0 => walk(&data[start..end], out, track),
@@ -108,9 +113,9 @@ pub fn run_vector(path: &Path) -> Outcome {
     let mut matched = 0usize;
     let mut failure = None;
     for (i, p) in packets(path).iter().enumerate() {
-        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.decode_all(p)));
+        let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dec.decode(p)));
         let out = match out {
-            Ok(Ok(v)) => v,
+            Ok(Ok(v)) => v.into_iter().collect::<Vec<_>>(),
             Ok(Err(e)) => {
                 failure = Some(format!("packet {i}: {e}"));
                 break;

@@ -179,3 +179,39 @@ pub(crate) static SEGMENTATION_FEATURE_BITS: [u8; 4] = [8, 6, 2, 0];
 
 /// 6.2.11.
 pub(crate) static SEGMENTATION_FEATURE_SIGNED: [u8; 4] = [1, 1, 0, 0];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn is_perm(s: &[u16]) -> bool {
+        let mut seen = vec![false; s.len()];
+        for &v in s {
+            if v as usize >= s.len() || seen[v as usize] {
+                return false;
+            }
+            seen[v as usize] = true;
+        }
+        true
+    }
+
+    #[test]
+    fn scans_are_permutations() {
+        for s in [&DEFAULT_SCAN_4X4[..], &COL_SCAN_4X4, &ROW_SCAN_4X4] {
+            assert!(is_perm(s));
+        }
+        for s in [&DEFAULT_SCAN_8X8[..], &COL_SCAN_8X8, &ROW_SCAN_8X8] {
+            assert!(is_perm(s));
+        }
+        for s in [&DEFAULT_SCAN_16X16[..], &COL_SCAN_16X16, &ROW_SCAN_16X16] {
+            assert!(is_perm(s));
+        }
+        assert!(is_perm(&DEFAULT_SCAN_32X32));
+    }
+
+    #[test]
+    fn bands_are_monotone() {
+        assert!(COEFBAND_8X8PLUS.windows(2).all(|w| w[0] <= w[1]));
+        assert!(COEFBAND_4X4.windows(2).all(|w| w[0] <= w[1]));
+    }
+}

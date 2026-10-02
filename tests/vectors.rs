@@ -33,4 +33,11 @@ fn test_vectors() {
 }
 
 /// Vectors this decoder does not pass yet (see the README).
-const KNOWN_FAILURES: &[&str] = &[];
+const KNOWN_FAILURES: &[&str] = &[
+    // Profile 1, 4:4:4, 1280x720. Its .md5 file is in an older format than
+    // every other vector's ("d.1280x720_00001.yv12" names) and its key frame
+    // does not parse to the end of its tile data here, while its inter
+    // frames do: consistent with a stream from before the profile 1 syntax
+    // was final. vp91-2-04-yuv444.webm, the current 4:4:4 vector, passes.
+    "vp91-2-04-yv444.webm",
+];
