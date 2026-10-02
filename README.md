@@ -105,10 +105,11 @@ Not there yet (in rough order of value):
   `TX_MODE_SELECT`, no sub-8x8 blocks.
 - **More references** — only LAST; no golden / alt-ref frames, hidden
   frames, compound prediction, or reference scaling.
-- **Probability updates** — every frame codes with the default
-  probabilities (no forward updates, and inter frames are error resilient
-  so there is no backward adaptation either); no high-precision (1/8)
-  motion vectors, no switchable interpolation filters.
+- **Other probability updates** — only the coefficient probabilities are
+  updated; mode, partition, skip and motion vector probabilities stay at
+  their defaults, and inter frames are error resilient, so there is no
+  backward adaptation and no motion vectors from the previous frame. No
+  high-precision (1/8) motion vectors, no switchable interpolation filters.
 - **Profiles 1–3.** What they need: the profile bits and colour config
   (bit depth and subsampling fields) in the header; source padding, the
   plane geometry and the distortion sums generalised from the hard-coded
@@ -118,7 +119,7 @@ Not there yet (in rough order of value):
   10 / 12-bit, the high-bit-depth quantiser tables, the extra `high_bit`s of
   category-6 tokens, and the rate-distortion multiplier scaled by
   2^(2(bitdepth - 8)). Samples are already `u16` throughout.
-- Speed: about 15 frames/s at 352x288, single-threaded.
+- Speed: about 12 frames/s at 352x288, single-threaded.
 
 Measured on the decoded frames of `vp90-2-03-size-226x226.webm` (10 frames
 of natural video, `tests/encode.rs`), 16x16 blocks, a key frame then nine
@@ -126,15 +127,15 @@ inter frames:
 
 | quantiser | bytes (10 frames) | key frame | per inter frame | PSNR Y | PSNR U | PSNR V |
 |---|---|---|---|---|---|---|
-| 16 | 144 251 | 25 550 | 13 189 | 49.87 dB | 51.54 dB | 51.24 dB |
-| 48 | 81 024 | 16 739 | 7 143 | 43.48 dB | 47.54 dB | 47.15 dB |
-| 96 | 50 712 | 11 431 | 4 365 | 38.84 dB | 44.69 dB | 44.21 dB |
-| 160 | 20 738 | 5 097 | 1 738 | 31.56 dB | 39.21 dB | 38.70 dB |
-| 240 | 4 520 | 847 | 408 | 22.63 dB | 32.67 dB | 32.49 dB |
-| 0 (lossless) | 268 262 | | | exact | exact | exact |
+| 16 | 141 491 | 24 022 | 13 052 | 49.87 dB | 51.54 dB | 51.24 dB |
+| 48 | 79 581 | 16 110 | 7 052 | 43.48 dB | 47.54 dB | 47.15 dB |
+| 96 | 49 031 | 11 221 | 4 201 | 38.84 dB | 44.69 dB | 44.21 dB |
+| 160 | 18 921 | 5 091 | 1 537 | 31.56 dB | 39.21 dB | 38.70 dB |
+| 240 | 4 337 | 795 | 394 | 22.63 dB | 32.67 dB | 32.49 dB |
+| 0 (lossless) | 245 092 | | | exact | exact | exact |
 
-At quantiser 64 the ten frames take 67 631 bytes with inter frames and
-134 304 coded all-intra.
+At quantiser 64 the ten frames take 66 184 bytes with inter frames and
+131 406 coded all-intra.
 
 ## How it is checked
 

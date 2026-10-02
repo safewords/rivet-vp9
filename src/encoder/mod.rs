@@ -6,8 +6,10 @@
 //! / NEARMV / ZEROMV / NEWMV) with intra as the alternative. The partition
 //! is fixed (square blocks of [`Config::block_size`], smaller where the
 //! frame edge forces it), the transform is the largest that fits the block,
-//! and quantisation is plain rounding with a dead zone. Probabilities stay
-//! at the specification's defaults: no forward or backward updates (inter
+//! and quantisation is plain rounding with a dead zone. The coefficient
+//! probabilities that pay for their update are sent in each frame's
+//! compressed header (judged on a first coding pass); the others stay at the
+//! specification's defaults, and there is no backward adaptation (inter
 //! frames are error resilient, so nothing carries over between frames but
 //! the reference pictures). `quantizer` 0 is lossless (4x4 Walsh-Hadamard).
 //!
