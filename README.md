@@ -80,6 +80,13 @@ Profile 0 (8-bit 4:2:0), one packet per frame, any size from 1x1 up:
 - **Fixed partition**: square blocks of `Config::block_size` (8, 16, 32 or
   64), split or halved where the frame edge forces it, each with the
   largest transform that fits; DCT and ADST as the intra mode implies.
+- **Coefficient probability updates**: a first pass over the frame
+  counts how each coefficient context's first three probabilities were
+  used, the compressed header sends the new probabilities that save more
+  than their update costs (the specification's `diff_update_prob` code),
+  and a second pass codes the frame with them, replaying the first pass's
+  block decisions. Between 2% and 9% smaller than the default probabilities
+  on the content below.
 - A loop filter level derived from the quantiser (or set).
 - A boolean encoder that is the exact inverse of the decoder's, and the
   minimum number of tile columns the frame width requires.
