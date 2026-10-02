@@ -54,9 +54,11 @@ Not there yet:
   at 426x240, 170 at 854x356, 23 at 1920x1080 and 8 at 3840x2160 on one
   core of the machine it was written on. No tile or frame threading, no
   SIMD, no frame-buffer pool (each frame allocates; output copies).
-- **Error recovery.** A corrupt frame returns `Error::Bitstream` and is
-  dropped; there is no concealment. Malformed input never panics (property
-  tests below), and frames larger than `DEFAULT_MAX_PIXELS` (8192x8192,
+- **Error recovery.** A corrupt frame returns `Error::Bitstream`; there is
+  no concealment, and the decoder's state after an error is whatever the
+  failed frame changed before it failed, so decoding should resume at the
+  next key frame. Malformed input has not made it panic under the property
+  tests below, and frames larger than `DEFAULT_MAX_PIXELS` (8192x8192,
   adjustable) are refused before allocation.
 - Conformance requirements that do not change the output (padding bit
   values, the 2:1 / 1:16 scaling bound on references the frame does not
@@ -250,7 +252,8 @@ settled by the test vectors:
 - **The inverse DCT** (8.7.1.3) loop bound "2n-7" in step 5b is 2·n − 7,
   confirmed by checking the transform against the real DCT.
 - **Above-right intra edges** (8.5.1) are used only for 4x4 transform
-  blocks not on the block's right edge — taken literally, and right.
+  blocks not on the block's right edge — surprising, but taken literally it
+  matches every vector.
 - **Several shown frames in one superframe** (Annex B allows it): the
   vectors expect the last one per packet (`vp90-2-22-svc_1280x720_3.ivf`).
 - **Inferred values are counted** (9.3): a `partition` forced to SPLIT at
