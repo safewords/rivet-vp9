@@ -1,7 +1,7 @@
 //! The decoder: frame-level process (section 8.1), reference slots, frame
 //! contexts, output.
 
-mod block;
+pub(crate) mod block;
 mod loopfilter;
 mod mvpred;
 mod recon;
@@ -15,7 +15,7 @@ use crate::probs::{self, Counts, Probs};
 use crate::superframe;
 use crate::{Error, Result};
 
-pub(crate) use block::MiInfo;
+pub(crate) use block::{FrameDec, MiInfo};
 
 /// The default limit of [`Decoder::set_max_pixels`]: 8192 x 8192.
 pub const DEFAULT_MAX_PIXELS: u64 = 8192 * 8192;
@@ -153,6 +153,11 @@ impl Decoder {
             }
         }
         Ok(out)
+    }
+
+    /// The frame in reference slot `i`.
+    pub(crate) fn ref_slot(&self, i: usize) -> Option<Arc<RefFrame>> {
+        self.refs[i].clone()
     }
 
     /// Number of frames decoded so far (shown or not).

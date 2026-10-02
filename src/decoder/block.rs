@@ -111,7 +111,7 @@ pub(crate) struct FrameDec<'a> {
 
 /// Probability of node `node` of the token tree (pareto, 9.3.2).
 #[inline]
-fn pareto(node: usize, prob: u8) -> u8 {
+pub(crate) fn pareto(node: usize, prob: u8) -> u8 {
     if node < 2 {
         return prob;
     }
@@ -301,7 +301,7 @@ impl<'a> FrameDec<'a> {
     }
 
     #[inline]
-    fn mi_at(&self, r: u32, c: u32) -> &MiInfo {
+    pub(crate) fn mi_at(&self, r: u32, c: u32) -> &MiInfo {
         &self.mi[(r * self.mi_cols + c) as usize]
     }
 
@@ -507,11 +507,11 @@ impl<'a> FrameDec<'a> {
         }
     }
 
-    fn left_ref(&self) -> [i8; 2] {
+    pub(crate) fn left_ref(&self) -> [i8; 2] {
         self.b.left.map_or([INTRA_FRAME, NONE], |m| m.ref_frame)
     }
 
-    fn above_ref(&self) -> [i8; 2] {
+    pub(crate) fn above_ref(&self) -> [i8; 2] {
         self.b.above.map_or([INTRA_FRAME, NONE], |m| m.ref_frame)
     }
 
@@ -788,7 +788,7 @@ impl<'a> FrameDec<'a> {
         }
     }
 
-    fn single_ref_p1_ctx(&self) -> usize {
+    pub(crate) fn single_ref_p1_ctx(&self) -> usize {
         let (au, al) = (self.b.avail_u, self.b.avail_l);
         let a = self.above_ref();
         let l = self.left_ref();
@@ -835,7 +835,7 @@ impl<'a> FrameDec<'a> {
         }
     }
 
-    fn single_ref_p2_ctx(&self) -> usize {
+    pub(crate) fn single_ref_p2_ctx(&self) -> usize {
         let (au, al) = (self.b.avail_u, self.b.avail_l);
         let a = self.above_ref();
         let l = self.left_ref();
@@ -1051,7 +1051,7 @@ impl<'a> FrameDec<'a> {
     }
 
     /// The TxType of get_scan (6.4.25).
-    fn tx_type(&self, plane: usize, tx_sz: u8, block_idx: usize) -> u8 {
+    pub(crate) fn tx_type(&self, plane: usize, tx_sz: u8, block_idx: usize) -> u8 {
         if plane > 0 || tx_sz == TX_32X32 {
             DCT_DCT
         } else if tx_sz == TX_4X4 {
