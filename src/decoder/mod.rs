@@ -348,3 +348,4 @@ impl Scale {
         (((base_x << 4) + dx) as i32, ((base_y << 4) + dy) as i32, step_x as i32, step_y as i32)
     }
 }
+

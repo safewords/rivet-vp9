@@ -92,8 +92,11 @@ fn superblock(
     let mi_cols = h.mi_cols;
     let stride = buf.stride;
     let step = if pass == 0 { 1 } else { stride };
+    // Every decision below depends on the 8x8 block a sample's luma
+    // position falls in, and a run of four samples along an edge never
+    // leaves one (in any subsampling): decide once per run.
     for edge in 0..(16u32 >> sub) {
-        for i in 0..edge_len {
+        for i in (0..edge_len).step_by(4) {
             let (x, y) = if pass == 0 {
                 (col * 8 + edge * (4 << sub_x), row * 8 + (i << sub_y))
             } else {
@@ -153,7 +156,10 @@ fn superblock(
             }
             let (limit, blimit, thresh) = params[l as usize];
             let pos = (y >> sub_y) as usize * stride + (x >> sub_x) as usize;
-            lf::filter(&mut buf.data, pos, step, filter_size, limit, blimit, thresh, h.bit_depth);
+            let along = if pass == 0 { stride } else { 1 };
+            for k in 0..4 {
+                lf::filter(&mut buf.data, pos + k * along, step, filter_size, limit, blimit, thresh, h.bit_depth);
+            }
         }
     }
 }
