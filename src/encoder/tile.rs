@@ -61,8 +61,9 @@ struct TxBlock {
 /// for those outside the frame.
 type PlaneCoding = Vec<Option<TxBlock>>;
 
+/// What a block was coded with.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Choice {
+pub(crate) enum Choice {
     Intra { y_mode: u8, uv_mode: u8 },
     Inter { y_mode: u8, mv: Mv },
 }
@@ -80,6 +81,11 @@ pub(crate) struct TileEncoder<'a> {
     /// How often each of the first three coefficient probabilities of
     /// every context saw a 0 and a 1: what forward updates are judged by.
     pub(crate) stats: Box<CoefStats>,
+    /// Every block's choice, in coding order.
+    pub(crate) decisions: Vec<Choice>,
+    /// Choices to replay instead of searching (a second pass), and the
+    /// next one.
+    pub(crate) replay: Option<(Vec<Choice>, usize)>,
 }
 
 /// `[txSz][plane > 0][is_inter][band][ctx][node][bit]`.
@@ -142,6 +148,8 @@ impl<'a> TileEncoder<'a> {
             pad_stride: 0,
             lambda,
             stats: Box::new([[[[[[[0; 2]; 3]; 6]; 6]; 2]; 2]; 4]),
+            decisions: Vec::new(),
+            replay: None,
         };
         if let Some(r) = last {
             let w = r.width as usize;
@@ -813,23 +821,43 @@ impl<'a> TileEncoder<'a> {
             ref_frame: [INTRA_FRAME, NONE],
             ..Block::default()
         };
-        let (intra, intra_cost) = self.best_intra(fd);
-        let mut choice = intra;
         let mut inter_mode_ctx = None;
-        if !self.h.frame_is_intra {
-            let (inter, inter_cost) = self.best_inter(fd);
-            // Intra costs one more flag in an inter frame either way; the
-            // comparison is between the two codings.
-            inter_mode_ctx = Some((
-                fd.b.mode_context,
-                fd.b.nearest_mv,
-                fd.b.near_mv,
-                fd.b.best_mv,
-            ));
-            if inter_cost < intra_cost {
-                choice = inter;
+        let replayed = self.replay.as_mut().map(|(v, i)| {
+            *i += 1;
+            v[*i - 1]
+        });
+        let choice = if let Some(choice) = replayed {
+            if matches!(choice, Choice::Inter { .. }) {
+                fd.b.ref_frame = [LAST_FRAME, NONE];
+                fd.find_best_ref_mvs(0);
+                inter_mode_ctx = Some((
+                    fd.b.mode_context,
+                    fd.b.nearest_mv,
+                    fd.b.near_mv,
+                    fd.b.best_mv,
+                ));
             }
-        }
+            choice
+        } else {
+            let (intra, intra_cost) = self.best_intra(fd);
+            let mut choice = intra;
+            if !self.h.frame_is_intra {
+                let (inter, inter_cost) = self.best_inter(fd);
+                // Intra costs one more flag in an inter frame either way; the
+                // comparison is between the two codings.
+                inter_mode_ctx = Some((
+                    fd.b.mode_context,
+                    fd.b.nearest_mv,
+                    fd.b.near_mv,
+                    fd.b.best_mv,
+                ));
+                if inter_cost < intra_cost {
+                    choice = inter;
+                }
+            }
+            choice
+        };
+        self.decisions.push(choice);
         // Final coding into the buffer.
         let codings: [PlaneCoding; 3] = match choice {
             Choice::Intra { y_mode, uv_mode } => {

@@ -147,9 +147,12 @@ impl Encoder {
         // coefficient statistics; the coefficient probabilities that pay
         // for their own update are sent, and the frame coded again with them.
         let defaults = Probs::default();
-        let (_, stats, _) = self.encode_pass(&h, &src, last.clone(), &defaults, false);
-        let probs = updated_coef_probs(&defaults, &stats, h.tx_mode);
-        let (tiles, _, recon) = self.encode_pass(&h, &src, last, &probs, true);
+        // The second pass replays the first's block decisions: they do not
+        // depend on the probabilities.
+        let first = self.encode_pass(&h, &src, last.clone(), &defaults, None);
+        let probs = updated_coef_probs(&defaults, &first.stats, h.tx_mode);
+        let second = self.encode_pass(&h, &src, last, &probs, Some(first.decisions));
+        let (tiles, recon) = (second.tiles, second.recon);
         let comp = compressed_header(&h, &defaults, &probs);
         let mut w = BitWriter::default();
         self.uncompressed_header(&mut w, &h, comp.len())?;
@@ -193,12 +196,9 @@ impl Encoder {
         src: &tile::Source,
         last: Option<Arc<RefFrame>>,
         probs: &Probs,
-        keep: bool,
-    ) -> (
-        Vec<u8>,
-        Box<tile::CoefStats>,
-        Option<[crate::decoder::PlaneBuf; 3]>,
-    ) {
+        replay: Option<Vec<tile::Choice>>,
+    ) -> Pass {
+        let keep = replay.is_some();
         let seg = Segmentation::default();
         let mut probs = probs.clone();
         let mut counts = Box::<Counts>::default();
@@ -209,13 +209,19 @@ impl Encoder {
         };
         let mut fd = FrameDec::new(h, &seg, &mut probs, &mut counts, &[], None, refs);
         let mut te = tile::TileEncoder::new(&self.cfg, h, src, last.as_deref());
+        te.replay = replay.map(|v| (v, 0));
         let t = te.encode_tiles(&mut fd);
         let recon = if keep && cfg!(debug_assertions) && self.loop_filter_level() == 0 {
             Some(fd.finish().0)
         } else {
             None
         };
-        (t, te.stats, recon)
+        Pass {
+            tiles: t,
+            stats: te.stats,
+            decisions: te.decisions,
+            recon,
+        }
     }
 
     fn loop_filter_level(&self) -> u8 {
@@ -344,6 +350,15 @@ impl Encoder {
         w.f(16, comp_len as u32);
         Ok(())
     }
+}
+
+/// What one coding pass over a frame produced.
+struct Pass {
+    tiles: Vec<u8>,
+    stats: Box<tile::CoefStats>,
+    decisions: Vec<tile::Choice>,
+    /// Debug builds without a loop filter: the reconstruction.
+    recon: Option<[crate::decoder::PlaneBuf; 3]>,
 }
 
 /// Bits of a bool of probability `p` (of a 0): its cost when 0 and when 1.
