@@ -44,7 +44,7 @@ fn synthetic(w: u32, h: u32, t: u32) -> Frame {
 /// Encodes `frames`, decodes the packets with a fresh decoder, returns the
 /// decoded frames and the packet sizes.
 fn round_trip(cfg: Config, frames: &[Frame]) -> (Vec<Frame>, Vec<usize>) {
-    let mut enc = Encoder::new(cfg).unwrap();
+    let mut enc = Encoder::new(cfg);
     let mut dec = Decoder::new();
     let mut out = Vec::new();
     let mut sizes = Vec::new();
@@ -144,11 +144,14 @@ fn moving_content_uses_motion() {
 
 #[test]
 fn bad_input_is_refused() {
-    assert!(Encoder::new(Config::new(0, 10)).is_err());
+    let f = Frame::new(16, 16, 8, ChromaFormat::Yuv420);
+    assert!(Config::new(0, 10).validate().is_err());
+    assert!(Encoder::new(Config::new(0, 10)).encode(&f).is_err());
     let mut cfg = Config::new(16, 16);
     cfg.block_size = 12;
-    assert!(Encoder::new(cfg).is_err());
-    let mut enc = Encoder::new(Config::new(16, 16)).unwrap();
+    assert!(Encoder::new(cfg).encode(&f).is_err());
+    let mut enc = Encoder::new(Config::new(16, 16));
+    assert!(enc.encode(&f).is_ok());
     assert!(enc.encode(&Frame::new(32, 16, 8, ChromaFormat::Yuv420)).is_err());
     assert!(enc.encode(&Frame::new(16, 16, 10, ChromaFormat::Yuv420)).is_err());
     assert!(enc.encode(&Frame::new(16, 16, 8, ChromaFormat::Yuv444)).is_err());

@@ -213,7 +213,7 @@ for packet in packets {
 // Encoding: 8-bit 4:2:0 frames in, one packet each out.
 let mut cfg = vp9::Config::new(1280, 720);
 cfg.quantizer = 60;
-let mut enc = vp9::Encoder::new(cfg)?;
+let mut enc = vp9::Encoder::new(cfg);
 let packet = enc.encode(&frame)?;
 ```
 

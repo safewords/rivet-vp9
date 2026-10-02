@@ -70,6 +70,21 @@ impl Config {
             full_range: false,
         }
     }
+
+    /// Checks the settings; [`Encoder::encode`] refuses to encode with an
+    /// invalid configuration and returns this error.
+    pub fn validate(&self) -> Result<()> {
+        if self.width == 0 || self.height == 0 || self.width > 65536 || self.height > 65536 {
+            return Err(Error::invalid("frame size must be 1 to 65536 in each direction"));
+        }
+        if ![8, 16, 32, 64].contains(&self.block_size) {
+            return Err(Error::invalid("block_size must be 8, 16, 32 or 64"));
+        }
+        if self.color_space == ColorSpace::Rgb {
+            return Err(Error::unsupported("sRGB needs profile 1"));
+        }
+        Ok(())
+    }
 }
 
 /// A VP9 encoder. See the [module documentation](self).
@@ -82,20 +97,12 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// An encoder for `cfg`.
-    pub fn new(cfg: Config) -> Result<Self> {
-        if cfg.width == 0 || cfg.height == 0 || cfg.width > 65536 || cfg.height > 65536 {
-            return Err(Error::invalid("frame size must be 1 to 65536 in each direction"));
-        }
-        if ![8, 16, 32, 64].contains(&cfg.block_size) {
-            return Err(Error::invalid("block_size must be 8, 16, 32 or 64"));
-        }
-        if cfg.color_space == ColorSpace::Rgb {
-            return Err(Error::unsupported("sRGB needs profile 1"));
-        }
+    /// An encoder for `cfg`. The configuration is checked by the first
+    /// [`Encoder::encode`] (or earlier with [`Config::validate`]).
+    pub fn new(cfg: Config) -> Self {
         let mut dec = Decoder::new();
         dec.set_max_pixels(cfg.width as u64 * cfg.height as u64);
-        Ok(Encoder { cfg, frames: 0, force_key: true, dec })
+        Encoder { cfg, frames: 0, force_key: true, dec }
     }
 
     /// The configuration.
@@ -110,6 +117,7 @@ impl Encoder {
 
     /// Encodes one frame into one packet (a complete VP9 frame).
     pub fn encode(&mut self, frame: &Frame) -> Result<Vec<u8>> {
+        self.cfg.validate()?;
         if frame.width != self.cfg.width || frame.height != self.cfg.height {
             return Err(Error::invalid(format!(
                 "frame is {}x{}, the encoder was configured for {}x{}",
@@ -360,7 +368,7 @@ mod tests {
     #[test]
     fn key_frame_decodes() {
         let f = gradient(80, 56, 0);
-        let mut enc = Encoder::new(Config::new(80, 56)).unwrap();
+        let mut enc = Encoder::new(Config::new(80, 56));
         let pkt = enc.encode(&f).unwrap();
         let out = Decoder::new().decode(&pkt).unwrap().unwrap();
         assert_eq!((out.width, out.height), (80, 56));
@@ -371,7 +379,7 @@ mod tests {
         let f = gradient(40, 24, 1);
         let mut cfg = Config::new(40, 24);
         cfg.quantizer = 0;
-        let mut enc = Encoder::new(cfg).unwrap();
+        let mut enc = Encoder::new(cfg);
         let mut dec = Decoder::new();
         for _ in 0..3 {
             let pkt = enc.encode(&f).unwrap();

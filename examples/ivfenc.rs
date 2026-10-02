@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(q) = args.get(5) {
         cfg.quantizer = q.parse()?;
     }
-    let mut enc = vp9::Encoder::new(cfg)?;
+    let mut enc = vp9::Encoder::new(cfg);
     let mut ivf = vp9::ivf::IvfWriter::new(w as u16, h as u16, 30, 1);
     let template = vp9::Frame::new(w, h, 8, vp9::ChromaFormat::Yuv420);
     let size = template.data.len();

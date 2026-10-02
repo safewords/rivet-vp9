@@ -22,7 +22,7 @@
 //! # Encoding
 //!
 //! ```
-//! let mut enc = vp9::Encoder::new(vp9::Config::new(64, 64))?;
+//! let mut enc = vp9::Encoder::new(vp9::Config::new(64, 64));
 //! let frame = vp9::Frame::new(64, 64, 8, vp9::ChromaFormat::Yuv420);
 //! let packet = enc.encode(&frame)?;
 //! let decoded = vp9::Decoder::new().decode(&packet)?.unwrap();
