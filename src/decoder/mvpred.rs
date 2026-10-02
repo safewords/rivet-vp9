@@ -30,14 +30,21 @@ impl FrameDec<'_> {
     /// is_inside (6.5.2).
     #[inline]
     fn is_inside(&self, r: i32, c: i32) -> bool {
-        r >= 0 && r < self.mi_rows as i32 && c >= self.mi_col_start as i32 && c < self.mi_col_end as i32
+        r >= 0
+            && r < self.mi_rows as i32
+            && c >= self.mi_col_start as i32
+            && c < self.mi_col_end as i32
     }
 
     /// get_block_mv (6.5.10).
     fn get_block_mv(&self, s: &mut Search, r: i32, c: i32, ref_list: usize, use_prev: bool) {
         let idx = (r as u32 * self.mi_cols + c as u32) as usize;
         if use_prev {
-            let p = self.prev_mvs.and_then(|v| v.get(idx)).copied().unwrap_or_default();
+            let p = self
+                .prev_mvs
+                .and_then(|v| v.get(idx))
+                .copied()
+                .unwrap_or_default();
             s.cand_mv[ref_list] = p.mv[ref_list];
             s.cand_frame[ref_list] = p.ref_frame[ref_list];
         } else {
@@ -61,7 +68,9 @@ impl FrameDec<'_> {
     /// scale_mv (6.5.9).
     fn scale_mv(&self, s: &mut Search, ref_list: usize, ref_frame: i8) {
         let cand = s.cand_frame[ref_list];
-        if self.h.ref_frame_sign_bias[cand as usize] != self.h.ref_frame_sign_bias[ref_frame as usize] {
+        if self.h.ref_frame_sign_bias[cand as usize]
+            != self.h.ref_frame_sign_bias[ref_frame as usize]
+        {
             s.cand_mv[ref_list][0] *= -1;
             s.cand_mv[ref_list][1] *= -1;
         }
@@ -101,7 +110,12 @@ impl FrameDec<'_> {
 
     /// find_mv_refs( refFrame, block ) (6.5.1). Returns RefListMv.
     pub(crate) fn find_mv_refs(&mut self, ref_frame: i8, block: i32) -> [Mv; 2] {
-        let mut s = Search { count: 0, list: [[0; 2]; 2], cand_mv: [[0; 2]; 2], cand_frame: [0; 2] };
+        let mut s = Search {
+            count: 0,
+            list: [[0; 2]; 2],
+            cand_mv: [[0; 2]; 2],
+            cand_frame: [0; 2],
+        };
         let mut context_counter = 0usize;
         let search = &MV_REF_BLOCKS[self.b.mi_size as usize];
         let (mi_row, mi_col) = (self.b.mi_row as i32, self.b.mi_col as i32);
@@ -114,7 +128,12 @@ impl FrameDec<'_> {
                 for j in 0..2 {
                     if m.ref_frame[j] == ref_frame {
                         // get_sub_block_mv (6.5.11)
-                        let idx = if block >= 0 { IDX_N_COLUMN_TO_SUBBLOCK[block as usize][(cand[1] == 0) as usize] as usize } else { 3 };
+                        let idx = if block >= 0 {
+                            IDX_N_COLUMN_TO_SUBBLOCK[block as usize][(cand[1] == 0) as usize]
+                                as usize
+                        } else {
+                            3
+                        };
                         s.cand_mv[j] = m.mv[j][idx];
                         s.add(j);
                         break;

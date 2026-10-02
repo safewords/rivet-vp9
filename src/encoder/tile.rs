@@ -108,15 +108,34 @@ fn bool_bits(p: u8, bit: bool) -> f64 {
 }
 
 fn mv_bits(d: Mv) -> f64 {
-    let comp = |v: i32| if v == 0 { 0.0 } else { 3.0 + 2.0 * ((v.unsigned_abs() as f64) / 8.0 + 1.0).log2() };
+    let comp = |v: i32| {
+        if v == 0 {
+            0.0
+        } else {
+            3.0 + 2.0 * ((v.unsigned_abs() as f64) / 8.0 + 1.0).log2()
+        }
+    };
     2.0 + comp(d[0]) + comp(d[1])
 }
 
 impl<'a> TileEncoder<'a> {
-    pub(crate) fn new(cfg: &'a Config, h: &'a FrameHeader, src: &'a Source, last: Option<&'a RefFrame>) -> Self {
+    pub(crate) fn new(
+        cfg: &'a Config,
+        h: &'a FrameHeader,
+        src: &'a Source,
+        last: Option<&'a RefFrame>,
+    ) -> Self {
         let q = AC_QLOOKUP[0][h.base_q_idx as usize] as f64 / 8.0;
         let lambda = 0.12 * q * q;
-        let mut te = TileEncoder { cfg, h, src, last, padded: Vec::new(), pad_stride: 0, lambda };
+        let mut te = TileEncoder {
+            cfg,
+            h,
+            src,
+            last,
+            padded: Vec::new(),
+            pad_stride: 0,
+            lambda,
+        };
         if let Some(r) = last {
             let w = r.width as usize;
             let ht = r.height as usize;
@@ -217,8 +236,13 @@ impl<'a> TileEncoder<'a> {
             above |= fd.above_partition[(c + i) as usize];
             left |= fd.left_partition[(r + i) as usize];
         }
-        let ctx = (bsl * 4 + (((left >> boffset) & 1) as u32) * 2 + ((above >> boffset) & 1) as u32) as usize;
-        let probs = if h.frame_is_intra { KF_PARTITION_PROBS[ctx] } else { fd.probs.partition[ctx] };
+        let ctx = (bsl * 4 + (((left >> boffset) & 1) as u32) * 2 + ((above >> boffset) & 1) as u32)
+            as usize;
+        let probs = if h.frame_is_intra {
+            KF_PARTITION_PROBS[ctx]
+        } else {
+            fd.probs.partition[ctx]
+        };
         if has_rows && has_cols {
             e.tree(&PARTITION_TREE, partition, |n| probs[n]);
         } else if has_cols {
@@ -265,7 +289,13 @@ impl<'a> TileEncoder<'a> {
         let psz = SS_SIZE_LOOKUP[bsize as usize][sx][sy];
         let x = ((fd.b.mi_col * 8) >> sx) as usize;
         let y = ((fd.b.mi_row * 8) >> sy) as usize;
-        (x, y, NUM_4X4_WIDE[psz as usize] as usize * 4, NUM_4X4_HIGH[psz as usize] as usize * 4, psz)
+        (
+            x,
+            y,
+            NUM_4X4_WIDE[psz as usize] as usize * 4,
+            NUM_4X4_HIGH[psz as usize] as usize * 4,
+            psz,
+        )
     }
 
     fn save(&self, fd: &FrameDec, plane: usize) -> Vec<u16> {
@@ -282,7 +312,8 @@ impl<'a> TileEncoder<'a> {
         let (x, y, w, h, _) = self.plane_region(fd, plane);
         let b = &mut fd.planes[plane];
         for i in 0..h {
-            b.data[(y + i) * b.stride + x..(y + i) * b.stride + x + w].copy_from_slice(&saved[i * w..(i + 1) * w]);
+            b.data[(y + i) * b.stride + x..(y + i) * b.stride + x + w]
+                .copy_from_slice(&saved[i * w..(i + 1) * w]);
         }
     }
 
@@ -312,7 +343,11 @@ impl<'a> TileEncoder<'a> {
     /// Returns the coded blocks and an estimate of their bits.
     fn code_plane(&self, fd: &mut FrameDec, plane: usize, intra: bool) -> (PlaneCoding, f64) {
         let h = self.h;
-        let tx_sz = if plane > 0 { fd.uv_tx_size() } else { fd.b.tx_size };
+        let tx_sz = if plane > 0 {
+            fd.uv_tx_size()
+        } else {
+            fd.b.tx_size
+        };
         let step = 1usize << tx_sz;
         let (base_x, base_y, pw, ph, _) = self.plane_region(fd, plane);
         let (n4w, n4h) = (pw / 4, ph / 4);
@@ -335,7 +370,16 @@ impl<'a> TileEncoder<'a> {
                 let start_y = base_y + 4 * y;
                 if start_x < max_x && start_y < max_y {
                     if intra {
-                        fd.predict_intra(plane, start_x, start_y, fd.b.avail_l || x > 0, fd.b.avail_u || y > 0, x + step < n4w, tx_sz, block_idx);
+                        fd.predict_intra(
+                            plane,
+                            start_x,
+                            start_y,
+                            fd.b.avail_l || x > 0,
+                            fd.b.avail_u || y > 0,
+                            x + step < n4w,
+                            tx_sz,
+                            block_idx,
+                        );
                     }
                     let tx_type = fd.tx_type(plane, tx_sz, block_idx);
                     let mut res = vec![0i32; n0 * n0];
@@ -345,7 +389,8 @@ impl<'a> TileEncoder<'a> {
                         let ss = self.src.stride[plane];
                         for i in 0..n0 {
                             for j in 0..n0 {
-                                res[i * n0 + j] = s[(start_y + i) * ss + start_x + j] as i32 - b.data[(start_y + i) * b.stride + start_x + j] as i32;
+                                res[i * n0 + j] = s[(start_y + i) * ss + start_x + j] as i32
+                                    - b.data[(start_y + i) * b.stride + start_x + j] as i32;
                             }
                         }
                     }
@@ -365,19 +410,30 @@ impl<'a> TileEncoder<'a> {
                             .collect()
                     };
                     let scan = scan_for(tx_sz, tx_type);
-                    let eob = scan.iter().rposition(|&p| coefs[p as usize] != 0).map_or(0, |i| i + 1);
+                    let eob = scan
+                        .iter()
+                        .rposition(|&p| coefs[p as usize] != 0)
+                        .map_or(0, |i| i + 1);
                     if eob > 0 {
                         fd.coefs[..n0 * n0].copy_from_slice(&coefs);
                         fd.reconstruct(plane, start_x, start_y, tx_sz, tx_type, eob);
                         bits += 2.0;
                         for &p in &scan[..eob] {
                             let v = coefs[p as usize];
-                            bits += if v == 0 { 1.5 } else { 3.0 + 2.0 * (1.0 + v.unsigned_abs() as f64).log2() };
+                            bits += if v == 0 {
+                                1.5
+                            } else {
+                                3.0 + 2.0 * (1.0 + v.unsigned_abs() as f64).log2()
+                            };
                         }
                     } else {
                         bits += 1.0;
                     }
-                    out.push(Some(TxBlock { coefs, tx_type, eob }));
+                    out.push(Some(TxBlock {
+                        coefs,
+                        tx_type,
+                        eob,
+                    }));
                 } else {
                     out.push(None);
                 }
@@ -400,7 +456,12 @@ impl<'a> TileEncoder<'a> {
         (c, cost)
     }
 
-    fn try_intra_chroma(&self, fd: &mut FrameDec, mode: u8, mode_bits: f64) -> ([PlaneCoding; 2], f64) {
+    fn try_intra_chroma(
+        &self,
+        fd: &mut FrameDec,
+        mode: u8,
+        mode_bits: f64,
+    ) -> ([PlaneCoding; 2], f64) {
         fd.b.uv_mode = mode;
         let (c1, b1) = self.code_plane(fd, 1, true);
         let (c2, b2) = self.code_plane(fd, 2, true);
@@ -421,7 +482,11 @@ impl<'a> TileEncoder<'a> {
     }
 
     fn uv_mode_bits(&self, fd: &FrameDec, y_mode: u8, mode: u8) -> f64 {
-        let p = if self.h.frame_is_intra { KF_UV_MODE_PROBS[y_mode as usize] } else { fd.probs.uv_mode[y_mode as usize] };
+        let p = if self.h.frame_is_intra {
+            KF_UV_MODE_PROBS[y_mode as usize]
+        } else {
+            fd.probs.uv_mode[y_mode as usize]
+        };
         tree_bits(&INTRA_MODE_TREE, mode, |n| p[n])
     }
 
@@ -452,13 +517,26 @@ impl<'a> TileEncoder<'a> {
             self.restore(fd, 1, &saved1);
             self.restore(fd, 2, &saved2);
         }
-        (Choice::Intra { y_mode, uv_mode: best_uv.0 }, best.1 + best_uv.1)
+        (
+            Choice::Intra {
+                y_mode,
+                uv_mode: best_uv.0,
+            },
+            best.1 + best_uv.1,
+        )
     }
 
     // -----------------------------------------------------------------
     // Inter.
 
-    fn block_sad_full(&self, fd: &FrameDec, mv_row_px: i32, mv_col_px: i32, w: usize, h: usize) -> u64 {
+    fn block_sad_full(
+        &self,
+        fd: &FrameDec,
+        mv_row_px: i32,
+        mv_col_px: i32,
+        w: usize,
+        h: usize,
+    ) -> u64 {
         let x0 = (fd.b.mi_col * 8) as isize + mv_col_px as isize + PAD as isize;
         let y0 = (fd.b.mi_row * 8) as isize + mv_row_px as isize + PAD as isize;
         let s = &self.src.planes[0];
@@ -483,7 +561,12 @@ impl<'a> TileEncoder<'a> {
     fn block_sad_sub(&self, fd: &FrameDec, mv: Mv, w: usize, h: usize, buf: &mut [u16]) -> u64 {
         let r = self.last.unwrap();
         let rp = &r.planes[0];
-        let refp = inter::RefPlane { data: &rp.data, stride: rp.stride, last_x: r.width as i32 - 1, last_y: r.height as i32 - 1 };
+        let refp = inter::RefPlane {
+            data: &rp.data,
+            stride: rp.stride,
+            last_x: r.width as i32 - 1,
+            last_y: r.height as i32 - 1,
+        };
         let x = (fd.b.mi_col * 8) as i32 * 16 + mv[1] * 2;
         let y = (fd.b.mi_row * 8) as i32 * 16 + mv[0] * 2;
         inter::predict(&refp, x, y, 16, 16, w, h, EIGHTTAP, 8, &mut buf[..w * h]);
@@ -494,7 +577,8 @@ impl<'a> TileEncoder<'a> {
         let mut acc = 0u64;
         for i in 0..h {
             for j in 0..w {
-                acc += (buf[i * w + j] as i32 - s[(by + i) * ss + bx + j] as i32).unsigned_abs() as u64;
+                acc += (buf[i * w + j] as i32 - s[(by + i) * ss + bx + j] as i32).unsigned_abs()
+                    as u64;
             }
         }
         acc
@@ -508,12 +592,21 @@ impl<'a> TileEncoder<'a> {
         let (r, c) = (fd.b.mi_row as i32, fd.b.mi_col as i32);
         let range = self.cfg.search_range as i32 * 8;
         let top = (-(r * 8 * 8) - (INTERP_EXTEND + bh * 8) * 8 + 8).max(-range);
-        let bottom = (((self.h.mi_rows as i32 - bh - r) * 8) * 8 + (INTERP_EXTEND + bh * 8) * 8 - 16).min(range);
+        let bottom = (((self.h.mi_rows as i32 - bh - r) * 8) * 8 + (INTERP_EXTEND + bh * 8) * 8
+            - 16)
+            .min(range);
         let left = (-(c * 8 * 8) - (INTERP_EXTEND + bw * 8) * 8 + 8).max(-range);
-        let right = (((self.h.mi_cols as i32 - bw - c) * 8) * 8 + (INTERP_EXTEND + bw * 8) * 8 - 16).min(range);
+        let right = (((self.h.mi_cols as i32 - bw - c) * 8) * 8 + (INTERP_EXTEND + bw * 8) * 8
+            - 16)
+            .min(range);
         // Keep whole-pixel search positions inside the padded reference too.
         let lim = (PAD as i32 - 8) * 8;
-        (top.max(-lim) & !1, bottom.min(lim) & !1, left.max(-lim) & !1, right.min(lim) & !1)
+        (
+            top.max(-lim) & !1,
+            bottom.min(lim) & !1,
+            left.max(-lim) & !1,
+            right.min(lim) & !1,
+        )
     }
 
     fn motion_search(&self, fd: &FrameDec) -> Mv {
@@ -523,7 +616,8 @@ impl<'a> TileEncoder<'a> {
         let inside = |m: Mv| m[0] >= top && m[0] <= bottom && m[1] >= left && m[1] <= right;
         let lam = (self.lambda.sqrt() * 1.2).max(1.0);
         let best_mv = fd.b.best_mv[0];
-        let cost = |sad: u64, m: Mv| sad as f64 + lam * mv_bits([m[0] - best_mv[0], m[1] - best_mv[1]]);
+        let cost =
+            |sad: u64, m: Mv| sad as f64 + lam * mv_bits([m[0] - best_mv[0], m[1] - best_mv[1]]);
         // Whole pixels.
         let mut best = ([0i32; 2], f64::MAX);
         let mut starts = vec![[0, 0], fd.b.nearest_mv[0], fd.b.near_mv[0]];
@@ -544,7 +638,16 @@ impl<'a> TileEncoder<'a> {
             while improved {
                 improved = false;
                 let centre = best.0;
-                for d in [[-step, 0], [step, 0], [0, -step], [0, step], [-step, -step], [-step, step], [step, -step], [step, step]] {
+                for d in [
+                    [-step, 0],
+                    [step, 0],
+                    [0, -step],
+                    [0, step],
+                    [-step, -step],
+                    [-step, step],
+                    [step, -step],
+                    [step, step],
+                ] {
                     let m = [centre[0] + d[0], centre[1] + d[1]];
                     if inside(m) {
                         let c = cost(self.block_sad_full(fd, m[0] / 8, m[1] / 8, w, h), m);
@@ -562,7 +665,16 @@ impl<'a> TileEncoder<'a> {
         best.1 = cost(self.block_sad_sub(fd, best.0, w, h, &mut buf), best.0);
         for step in [4, 2] {
             let centre = best.0;
-            for d in [[-step, 0], [step, 0], [0, -step], [0, step], [-step, -step], [-step, step], [step, -step], [step, step]] {
+            for d in [
+                [-step, 0],
+                [step, 0],
+                [0, -step],
+                [0, step],
+                [-step, -step],
+                [-step, step],
+                [step, -step],
+                [step, step],
+            ] {
                 let m = [centre[0] + d[0], centre[1] + d[1]];
                 if inside(m) {
                     let c = cost(self.block_sad_sub(fd, m, w, h, &mut buf), m);
@@ -577,7 +689,13 @@ impl<'a> TileEncoder<'a> {
 
     /// Predicts every plane of the block with `mv` (the decoder's process)
     /// and codes the residual; returns codings and the cost.
-    fn try_inter(&self, fd: &mut FrameDec, y_mode: u8, mv: Mv, mode_bits: f64) -> ([PlaneCoding; 3], f64) {
+    fn try_inter(
+        &self,
+        fd: &mut FrameDec,
+        y_mode: u8,
+        mv: Mv,
+        mode_bits: f64,
+    ) -> ([PlaneCoding; 3], f64) {
         fd.b.is_inter = true;
         fd.b.ref_frame = [LAST_FRAME, NONE];
         fd.b.y_mode = y_mode;
@@ -588,7 +706,8 @@ impl<'a> TileEncoder<'a> {
         let mut sse = 0.0;
         for (plane, coding) in codings.iter_mut().enumerate() {
             let (x, y, w, h, _) = self.plane_region(fd, plane);
-            fd.predict_inter(plane, x, y, w, h, 0).expect("reference present");
+            fd.predict_inter(plane, x, y, w, h, 0)
+                .expect("reference present");
             let (c, b) = self.code_plane(fd, plane, false);
             *coding = c;
             bits += b;
@@ -614,7 +733,11 @@ impl<'a> TileEncoder<'a> {
         let inside = |m: Mv| m[0] >= top && m[0] <= bottom && m[1] >= left && m[1] <= right;
         let lam = (self.lambda.sqrt() * 1.2).max(1.0);
         let mut buf = vec![0u16; w * h];
-        let mut cands = vec![(ZEROMV, [0, 0]), (NEARESTMV, fd.b.nearest_mv[0]), (NEARMV, fd.b.near_mv[0])];
+        let mut cands = vec![
+            (ZEROMV, [0, 0]),
+            (NEARESTMV, fd.b.nearest_mv[0]),
+            (NEARMV, fd.b.near_mv[0]),
+        ];
         if searched != fd.b.nearest_mv[0] && searched != fd.b.near_mv[0] && searched != [0, 0] {
             cands.push((NEWMV, searched));
         }
@@ -637,13 +760,22 @@ impl<'a> TileEncoder<'a> {
         let saved: Vec<Vec<u16>> = (0..3).map(|p| self.save(fd, p)).collect();
         let mut bits = self.inter_mode_bits(fd, best.0);
         if best.0 == NEWMV {
-            bits += mv_bits([best.1[0] - fd.b.best_mv[0][0], best.1[1] - fd.b.best_mv[0][1]]);
+            bits += mv_bits([
+                best.1[0] - fd.b.best_mv[0][0],
+                best.1[1] - fd.b.best_mv[0][1],
+            ]);
         }
         let (_, cost) = self.try_inter(fd, best.0, best.1, bits);
         for (p, s) in saved.iter().enumerate() {
             self.restore(fd, p, s);
         }
-        (Choice::Inter { y_mode: best.0, mv: best.1 }, cost)
+        (
+            Choice::Inter {
+                y_mode: best.0,
+                mv: best.1,
+            },
+            cost,
+        )
     }
 
     // -----------------------------------------------------------------
@@ -652,15 +784,24 @@ impl<'a> TileEncoder<'a> {
     fn block(&mut self, e: &mut BoolEncoder, fd: &mut FrameDec, r: u32, c: u32, bsize: u8) {
         let avail_u = r > 0;
         let avail_l = c > fd.mi_col_start;
-        let tx_size = MAX_TXSIZE_LOOKUP[bsize as usize].min(TX_MODE_TO_BIGGEST_TX_SIZE[self.h.tx_mode as usize]);
+        let tx_size = MAX_TXSIZE_LOOKUP[bsize as usize]
+            .min(TX_MODE_TO_BIGGEST_TX_SIZE[self.h.tx_mode as usize]);
         fd.b = Block {
             mi_row: r,
             mi_col: c,
             mi_size: bsize,
             avail_u,
             avail_l,
-            above: if avail_u { Some(*fd.mi_at(r - 1, c)) } else { None },
-            left: if avail_l { Some(*fd.mi_at(r, c - 1)) } else { None },
+            above: if avail_u {
+                Some(*fd.mi_at(r - 1, c))
+            } else {
+                None
+            },
+            left: if avail_l {
+                Some(*fd.mi_at(r, c - 1))
+            } else {
+                None
+            },
             tx_size,
             ref_frame: [INTRA_FRAME, NONE],
             ..Block::default()
@@ -672,7 +813,12 @@ impl<'a> TileEncoder<'a> {
             let (inter, inter_cost) = self.best_inter(fd);
             // Intra costs one more flag in an inter frame either way; the
             // comparison is between the two codings.
-            inter_mode_ctx = Some((fd.b.mode_context, fd.b.nearest_mv, fd.b.near_mv, fd.b.best_mv));
+            inter_mode_ctx = Some((
+                fd.b.mode_context,
+                fd.b.nearest_mv,
+                fd.b.near_mv,
+                fd.b.best_mv,
+            ));
             if inter_cost < intra_cost {
                 choice = inter;
             }
@@ -697,10 +843,13 @@ impl<'a> TileEncoder<'a> {
                 self.try_inter(fd, y_mode, mv, 0.0).0
             }
         };
-        let skip = codings.iter().all(|p| p.iter().all(|t| t.as_ref().is_none_or(|t| t.eob == 0)));
+        let skip = codings
+            .iter()
+            .all(|p| p.iter().all(|t| t.as_ref().is_none_or(|t| t.eob == 0)));
         fd.b.skip = skip;
         // Mode info.
-        let skip_ctx = fd.b.above.map_or(0, |m| m.skip as usize) + fd.b.left.map_or(0, |m| m.skip as usize);
+        let skip_ctx =
+            fd.b.above.map_or(0, |m| m.skip as usize) + fd.b.left.map_or(0, |m| m.skip as usize);
         if self.h.frame_is_intra {
             e.write(skip, fd.probs.skip[skip_ctx]);
             let am = fd.b.above.map_or(DC_PRED, |m| m.sub_modes[2]);
@@ -715,7 +864,11 @@ impl<'a> TileEncoder<'a> {
             let left_intra = fd.left_ref()[0] <= INTRA_FRAME;
             let above_intra = fd.above_ref()[0] <= INTRA_FRAME;
             let ctx = if avail_u && avail_l {
-                if left_intra && above_intra { 3 } else { (left_intra || above_intra) as usize }
+                if left_intra && above_intra {
+                    3
+                } else {
+                    (left_intra || above_intra) as usize
+                }
             } else if avail_u || avail_l {
                 2 * (if avail_u { above_intra } else { left_intra }) as usize
             } else {
@@ -743,7 +896,11 @@ impl<'a> TileEncoder<'a> {
         }
         // Residual tokens, plane by plane, with the decoder's contexts.
         for (plane, coding) in codings.iter().enumerate() {
-            let tx_sz = if plane > 0 { fd.uv_tx_size() } else { fd.b.tx_size };
+            let tx_sz = if plane > 0 {
+                fd.uv_tx_size()
+            } else {
+                fd.b.tx_size
+            };
             let step = 1usize << tx_sz;
             let (base_x, base_y, pw, _, _) = self.plane_region(fd, plane);
             let n4w = pw / 4;
@@ -791,8 +948,15 @@ impl<'a> TileEncoder<'a> {
 /// (dc, ac) quantiser of a plane.
 fn fd_q(h: &FrameHeader, plane: usize) -> (i32, i32) {
     let q = h.base_q_idx;
-    let (dcd, acd) = if plane == 0 { (h.delta_q_y_dc, 0) } else { (h.delta_q_uv_dc, h.delta_q_uv_ac) };
-    (DC_QLOOKUP[0][(q + dcd).clamp(0, 255) as usize], AC_QLOOKUP[0][(q + acd).clamp(0, 255) as usize])
+    let (dcd, acd) = if plane == 0 {
+        (h.delta_q_y_dc, 0)
+    } else {
+        (h.delta_q_uv_dc, h.delta_q_uv_ac)
+    };
+    (
+        DC_QLOOKUP[0][(q + dcd).clamp(0, 255) as usize],
+        AC_QLOOKUP[0][(q + acd).clamp(0, 255) as usize],
+    )
 }
 
 fn scan_for(tx_sz: u8, tx_type: u8) -> &'static [u16] {
@@ -811,7 +975,15 @@ fn scan_for(tx_sz: u8, tx_type: u8) -> &'static [u16] {
 }
 
 /// The inverse of tokens() (6.4.24): the same contexts, writing.
-fn write_tokens(e: &mut BoolEncoder, fd: &mut FrameDec, plane: usize, start_x: usize, start_y: usize, tx_sz: u8, tb: &TxBlock) {
+fn write_tokens(
+    e: &mut BoolEncoder,
+    fd: &mut FrameDec,
+    plane: usize,
+    start_x: usize,
+    start_y: usize,
+    tx_sz: u8,
+    tb: &TxBlock,
+) {
     let scan = scan_for(tx_sz, tb.tx_type);
     let seg_eob = 16usize << (tx_sz << 1);
     let ref_type = fd.b.is_inter as usize;
@@ -839,7 +1011,11 @@ fn write_tokens(e: &mut BoolEncoder, fd: &mut FrameDec, plane: usize, start_x: u
     let mut c = 0;
     while c < seg_eob {
         let pos = scan[c] as usize;
-        let band = if tx_sz == TX_4X4 { COEFBAND_4X4[c] } else { COEFBAND_8X8PLUS[c] } as usize;
+        let band = if tx_sz == TX_4X4 {
+            COEFBAND_4X4[c]
+        } else {
+            COEFBAND_8X8PLUS[c]
+        } as usize;
         if c > 0 {
             let i = pos >> log2n;
             let j = pos & (n - 1);
@@ -877,7 +1053,9 @@ fn write_tokens(e: &mut BoolEncoder, fd: &mut FrameDec, plane: usize, start_x: u
             35..=66 => 9,
             _ => 10,
         };
-        e.tree(&TOKEN_TREE, token, |node| pareto(node, probs[(1 + node).min(2)]));
+        e.tree(&TOKEN_TREE, token, |node| {
+            pareto(node, probs[(1 + node).min(2)])
+        });
         fd.token_cache[pos] = ENERGY_CLASS[token as usize];
         if token == ZERO_TOKEN {
             check_eob = false;
@@ -910,7 +1088,11 @@ fn write_mv(e: &mut BoolEncoder, fd: &FrameDec, d: Mv) {
         }
         e.write(v < 0, fd.probs.mv_sign[comp]);
         let z = v.unsigned_abs() - 1;
-        let class = if z < 16 { 0 } else { (31 - (z >> 3).leading_zeros()) as u8 };
+        let class = if z < 16 {
+            0
+        } else {
+            (31 - (z >> 3).leading_zeros()) as u8
+        };
         let pc = fd.probs.mv_class[comp];
         e.tree(&MV_CLASS_TREE, class, |n| pc[n]);
         if class == 0 {

@@ -26,7 +26,13 @@ impl<'a> BoolDecoder<'a> {
         if data.is_empty() {
             return Err(Error::bitstream("boolean-coded partition of size 0"));
         }
-        let mut d = BoolDecoder { data, pos: 0, value: 0, bits: 0, range: 255 };
+        let mut d = BoolDecoder {
+            data,
+            pos: 0,
+            value: 0,
+            bits: 0,
+            range: 255,
+        };
         d.fill();
         if d.read(128) {
             return Err(Error::bitstream("boolean decoder marker bit is not 0"));
@@ -117,7 +123,12 @@ impl Default for BoolEncoder {
 
 impl BoolEncoder {
     pub(crate) fn new() -> Self {
-        let mut e = BoolEncoder { buf: Vec::new(), low: 0, range: 255, count: 0 };
+        let mut e = BoolEncoder {
+            buf: Vec::new(),
+            low: 0,
+            range: 255,
+            count: 0,
+        };
         // The marker bit init_bool reads.
         e.write(false, 128);
         e
@@ -228,7 +239,13 @@ mod tests {
             b as u32
         }
         fn new(data: &'a [u8]) -> Self {
-            let mut d = SpecDecoder { data, pos: 0, value: 0, range: 255, max_bits: 8 * data.len() as i64 - 8 };
+            let mut d = SpecDecoder {
+                data,
+                pos: 0,
+                value: 0,
+                range: 255,
+                max_bits: 8 * data.len() as i64 - 8,
+            };
             for _ in 0..8 {
                 d.value = 2 * d.value + d.read_bit();
             }
@@ -260,7 +277,9 @@ mod tests {
     }
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
@@ -274,7 +293,11 @@ mod tests {
                 let p = 1 + (lcg(&mut seed) % 255) as u8;
                 // Skew the bits towards the probability sometimes, against it others.
                 let r = lcg(&mut seed) % 256;
-                let bit = if trial % 3 == 0 { r % 2 == 1 } else { r >= p as u32 };
+                let bit = if trial % 3 == 0 {
+                    r % 2 == 1
+                } else {
+                    r >= p as u32
+                };
                 syms.push((p, bit));
             }
             let mut e = BoolEncoder::new();
@@ -303,7 +326,10 @@ mod tests {
         let mut d = BoolDecoder::new(&data).unwrap();
         assert_eq!(d.literal(7), 93);
         for v in 0..10u8 {
-            assert_eq!(d.tree(&crate::consts::INTRA_MODE_TREE, |n| 30 + 20 * n as u8), v);
+            assert_eq!(
+                d.tree(&crate::consts::INTRA_MODE_TREE, |n| 30 + 20 * n as u8),
+                v
+            );
         }
     }
 }

@@ -129,11 +129,26 @@ fn merge_prob(pre_prob: u8, ct0: u32, ct1: u32, count_sat: u32, max_update_facto
 }
 
 /// merge_probs (8.4.2): adapts `probs` along `tree` from node `i`.
-fn merge_probs(tree: &[i8], i: usize, probs: &mut [u8], counts: &[u32], count_sat: u32, upd: u32) -> u32 {
+fn merge_probs(
+    tree: &[i8],
+    i: usize,
+    probs: &mut [u8],
+    counts: &[u32],
+    count_sat: u32,
+    upd: u32,
+) -> u32 {
     let s = tree[i];
-    let left = if s <= 0 { counts[(-s) as usize] } else { merge_probs(tree, s as usize, probs, counts, count_sat, upd) };
+    let left = if s <= 0 {
+        counts[(-s) as usize]
+    } else {
+        merge_probs(tree, s as usize, probs, counts, count_sat, upd)
+    };
     let r = tree[i + 1];
-    let right = if r <= 0 { counts[(-r) as usize] } else { merge_probs(tree, r as usize, probs, counts, count_sat, upd) };
+    let right = if r <= 0 {
+        counts[(-r) as usize]
+    } else {
+        merge_probs(tree, r as usize, probs, counts, count_sat, upd)
+    };
     probs[i >> 1] = merge_prob(probs[i >> 1], left, right, count_sat, upd);
     left + right
 }
@@ -148,7 +163,12 @@ fn adapt_prob(prob: &mut u8, counts: &[u32; 2]) {
 
 /// adapt_coef_probs (8.4.3). `probs` holds the pre-frame probabilities
 /// (load_probs has been done).
-pub(crate) fn adapt_coef_probs(probs: &mut Probs, counts: &Counts, frame_is_intra: bool, last_frame_was_key: bool) {
+pub(crate) fn adapt_coef_probs(
+    probs: &mut Probs,
+    counts: &Counts,
+    frame_is_intra: bool,
+    last_frame_was_key: bool,
+) {
     let update_factor = if frame_is_intra {
         112
     } else if last_frame_was_key {
@@ -163,8 +183,22 @@ pub(crate) fn adapt_coef_probs(probs: &mut Probs, counts: &Counts, frame_is_intr
                     let max_l = if k == 0 { 3 } else { 6 };
                     for l in 0..max_l {
                         let p = &mut probs.coef[t][i][j][k][l];
-                        merge_probs(&SMALL_TOKEN_TREE, 2, p, &counts.token[t][i][j][k][l], 24, update_factor);
-                        merge_probs(&BINARY_TREE, 0, p, &counts.more_coefs[t][i][j][k][l], 24, update_factor);
+                        merge_probs(
+                            &SMALL_TOKEN_TREE,
+                            2,
+                            p,
+                            &counts.token[t][i][j][k][l],
+                            24,
+                            update_factor,
+                        );
+                        merge_probs(
+                            &BINARY_TREE,
+                            0,
+                            p,
+                            &counts.more_coefs[t][i][j][k][l],
+                            24,
+                            update_factor,
+                        );
                     }
                 }
             }
@@ -195,23 +229,39 @@ pub(crate) fn adapt_noncoef_probs(
         }
     }
     for i in 0..7 {
-        adapt_probs(&INTER_MODE_TREE, &mut probs.inter_mode[i], &counts.inter_mode[i]);
+        adapt_probs(
+            &INTER_MODE_TREE,
+            &mut probs.inter_mode[i],
+            &counts.inter_mode[i],
+        );
     }
     for i in 0..4 {
-        adapt_probs(&INTRA_MODE_TREE, &mut probs.y_mode[i], &counts.intra_mode[i]);
+        adapt_probs(
+            &INTRA_MODE_TREE,
+            &mut probs.y_mode[i],
+            &counts.intra_mode[i],
+        );
     }
     for i in 0..10 {
         adapt_probs(&INTRA_MODE_TREE, &mut probs.uv_mode[i], &counts.uv_mode[i]);
     }
     for i in 0..16 {
-        adapt_probs(&PARTITION_TREE, &mut probs.partition[i], &counts.partition[i]);
+        adapt_probs(
+            &PARTITION_TREE,
+            &mut probs.partition[i],
+            &counts.partition[i],
+        );
     }
     for i in 0..3 {
         adapt_prob(&mut probs.skip[i], &counts.skip[i]);
     }
     if interp_switchable {
         for i in 0..4 {
-            adapt_probs(&INTERP_FILTER_TREE, &mut probs.interp_filter[i], &counts.interp_filter[i]);
+            adapt_probs(
+                &INTERP_FILTER_TREE,
+                &mut probs.interp_filter[i],
+                &counts.interp_filter[i],
+            );
         }
     }
     if tx_mode_select {
@@ -230,7 +280,11 @@ pub(crate) fn adapt_noncoef_probs(
             adapt_prob(&mut probs.mv_bits[i][j], &counts.mv_bits[i][j]);
         }
         for j in 0..2 {
-            adapt_probs(&MV_FR_TREE, &mut probs.mv_class0_fr[i][j], &counts.mv_class0_fr[i][j]);
+            adapt_probs(
+                &MV_FR_TREE,
+                &mut probs.mv_class0_fr[i][j],
+                &counts.mv_class0_fr[i][j],
+            );
         }
         adapt_probs(&MV_FR_TREE, &mut probs.mv_fr[i], &counts.mv_fr[i]);
         if allow_hp {
@@ -249,7 +303,10 @@ mod tests {
         // No observations: unchanged.
         assert_eq!(merge_prob(77, 0, 0, 20, 128), 77);
         // Saturated all-zero observations pull halfway (factor 128) to 255.
-        assert_eq!(merge_prob(1, 100, 0, 20, 128), ((256 - 128 + 255 * 128 + 128) >> 8) as u8);
+        assert_eq!(
+            merge_prob(1, 100, 0, 20, 128),
+            ((256 - 128 + 255 * 128 + 128) >> 8) as u8
+        );
         // All ones pull towards 1.
         assert!(merge_prob(200, 0, 50, 20, 128) < 110);
     }

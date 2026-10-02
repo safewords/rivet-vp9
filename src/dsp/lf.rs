@@ -73,7 +73,17 @@ pub(crate) fn filter(
 
 #[allow(clippy::too_many_arguments)]
 #[inline]
-fn narrow(buf: &mut [u16], pos: usize, step: usize, hev: bool, bit_depth: u32, p1: i32, p0: i32, q0: i32, q1: i32) {
+fn narrow(
+    buf: &mut [u16],
+    pos: usize,
+    step: usize,
+    hev: bool,
+    bit_depth: u32,
+    p1: i32,
+    p0: i32,
+    q0: i32,
+    q1: i32,
+) {
     let lo = -(1 << (bit_depth - 1));
     let hi = (1 << (bit_depth - 1)) - 1;
     let c = |v: i32| v.clamp(lo, hi);

@@ -79,7 +79,11 @@ pub(crate) fn predict(
             for i in 0..size {
                 for j in 0..size {
                     let k = (i / 2 + j) as isize;
-                    pred[i][j] = if i & 1 != 0 { r2(a(k) + a(k + 1) * 2 + a(k + 2), 2) } else { r2(a(k) + a(k + 1), 1) };
+                    pred[i][j] = if i & 1 != 0 {
+                        r2(a(k) + a(k + 1) * 2 + a(k + 2), 2)
+                    } else {
+                        r2(a(k) + a(k + 1), 1)
+                    };
                 }
             }
         }
@@ -127,7 +131,10 @@ pub(crate) fn predict(
                 pred[i][1] = r2(l(i - 2) + 2 * l(i - 1) + l(i), 2);
             }
             for j in 2..size {
-                pred[0][j] = r2(a(j as isize - 3) + 2 * a(j as isize - 2) + a(j as isize - 1), 2);
+                pred[0][j] = r2(
+                    a(j as isize - 3) + 2 * a(j as isize - 2) + a(j as isize - 1),
+                    2,
+                );
             }
             for i in 1..size {
                 for j in 2..size {
@@ -202,7 +209,10 @@ mod tests {
         let above = [77; 9];
         let left = [77; 4];
         for mode in 0..10 {
-            assert!(run(mode, &above, &left).iter().all(|&v| v == 77), "mode {mode}");
+            assert!(
+                run(mode, &above, &left).iter().all(|&v| v == 77),
+                "mode {mode}"
+            );
         }
     }
 }

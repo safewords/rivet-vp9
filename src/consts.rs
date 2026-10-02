@@ -142,12 +142,13 @@ pub(crate) const COUNTER_TO_CONTEXT: [u8; 19] = [
 
 /// `max_txsize_lookup` (6.4.10).
 pub(crate) const MAX_TXSIZE_LOOKUP: [u8; 13] = [
-    TX_4X4, TX_4X4, TX_4X4, TX_8X8, TX_8X8, TX_8X8, TX_16X16, TX_16X16, TX_16X16, TX_32X32, TX_32X32,
-    TX_32X32, TX_32X32,
+    TX_4X4, TX_4X4, TX_4X4, TX_8X8, TX_8X8, TX_8X8, TX_16X16, TX_16X16, TX_16X16, TX_32X32,
+    TX_32X32, TX_32X32, TX_32X32,
 ];
 
 /// `tx_mode_to_biggest_tx_size` (10.2).
-pub(crate) const TX_MODE_TO_BIGGEST_TX_SIZE: [u8; 5] = [TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_32X32];
+pub(crate) const TX_MODE_TO_BIGGEST_TX_SIZE: [u8; 5] =
+    [TX_4X4, TX_8X8, TX_16X16, TX_32X32, TX_32X32];
 
 const I: u8 = BLOCK_INVALID;
 
@@ -185,9 +186,51 @@ pub(crate) const SUBSIZE_LOOKUP: [[u8; 13]; 4] = [
         BLOCK_64X32,
         BLOCK_64X64,
     ],
-    [I, I, I, BLOCK_8X4, I, I, BLOCK_16X8, I, I, BLOCK_32X16, I, I, BLOCK_64X32],
-    [I, I, I, BLOCK_4X8, I, I, BLOCK_8X16, I, I, BLOCK_16X32, I, I, BLOCK_32X64],
-    [I, I, I, BLOCK_4X4, I, I, BLOCK_8X8, I, I, BLOCK_16X16, I, I, BLOCK_32X32],
+    [
+        I,
+        I,
+        I,
+        BLOCK_8X4,
+        I,
+        I,
+        BLOCK_16X8,
+        I,
+        I,
+        BLOCK_32X16,
+        I,
+        I,
+        BLOCK_64X32,
+    ],
+    [
+        I,
+        I,
+        I,
+        BLOCK_4X8,
+        I,
+        I,
+        BLOCK_8X16,
+        I,
+        I,
+        BLOCK_16X32,
+        I,
+        I,
+        BLOCK_32X64,
+    ],
+    [
+        I,
+        I,
+        I,
+        BLOCK_4X4,
+        I,
+        I,
+        BLOCK_8X8,
+        I,
+        I,
+        BLOCK_16X16,
+        I,
+        I,
+        BLOCK_32X32,
+    ],
 ];
 
 /// `mode2txfm_map` (10.2).
@@ -231,12 +274,21 @@ pub(crate) const CAT_PROBS: [&[u8]; 7] = [
     &[173, 148, 140],
     &[176, 155, 140, 135],
     &[180, 157, 141, 134, 130],
-    &[254, 254, 254, 252, 249, 243, 230, 196, 177, 153, 140, 133, 130, 129],
+    &[
+        254, 254, 254, 252, 249, 243, 230, 196, 177, 153, 140, 133, 130, 129,
+    ],
 ];
 
 // Decode trees (9.3.1). Leaves are negated values; index 0 is never the
 // target of a branch, so a leaf of value 0 is written as 0.
-pub(crate) const PARTITION_TREE: [i8; 6] = [-(PARTITION_NONE as i8), 2, -(PARTITION_HORZ as i8), 4, -(PARTITION_VERT as i8), -(PARTITION_SPLIT as i8)];
+pub(crate) const PARTITION_TREE: [i8; 6] = [
+    -(PARTITION_NONE as i8),
+    2,
+    -(PARTITION_HORZ as i8),
+    4,
+    -(PARTITION_VERT as i8),
+    -(PARTITION_SPLIT as i8),
+];
 pub(crate) const INTRA_MODE_TREE: [i8; 18] = [
     -(DC_PRED as i8),
     2,
@@ -258,23 +310,45 @@ pub(crate) const INTRA_MODE_TREE: [i8; 18] = [
     -(D207_PRED as i8),
 ];
 pub(crate) const SEGMENT_TREE: [i8; 14] = [2, 4, 6, 8, 10, 12, 0, -1, -2, -3, -4, -5, -6, -7];
-pub(crate) const TX_SIZE_32_TREE: [i8; 6] = [-(TX_4X4 as i8), 2, -(TX_8X8 as i8), 4, -(TX_16X16 as i8), -(TX_32X32 as i8)];
-pub(crate) const TX_SIZE_16_TREE: [i8; 4] = [-(TX_4X4 as i8), 2, -(TX_8X8 as i8), -(TX_16X16 as i8)];
+pub(crate) const TX_SIZE_32_TREE: [i8; 6] = [
+    -(TX_4X4 as i8),
+    2,
+    -(TX_8X8 as i8),
+    4,
+    -(TX_16X16 as i8),
+    -(TX_32X32 as i8),
+];
+pub(crate) const TX_SIZE_16_TREE: [i8; 4] =
+    [-(TX_4X4 as i8), 2, -(TX_8X8 as i8), -(TX_16X16 as i8)];
 pub(crate) const TX_SIZE_8_TREE: [i8; 2] = [-(TX_4X4 as i8), -(TX_8X8 as i8)];
 /// inter_mode_tree; values are `inter_mode` = y_mode - NEARESTMV.
 pub(crate) const INTER_MODE_TREE: [i8; 6] = [
     -2, // ZEROMV - NEARESTMV
-    2,
-    0, // NEARESTMV - NEARESTMV
-    4,
-    -1, // NEARMV - NEARESTMV
+    2, 0, // NEARESTMV - NEARESTMV
+    4, -1, // NEARMV - NEARESTMV
     -3, // NEWMV - NEARESTMV
 ];
-pub(crate) const INTERP_FILTER_TREE: [i8; 4] = [-(EIGHTTAP as i8), 2, -(EIGHTTAP_SMOOTH as i8), -(EIGHTTAP_SHARP as i8)];
-pub(crate) const MV_JOINT_TREE: [i8; 6] = [-(MV_JOINT_ZERO as i8), 2, -(MV_JOINT_HNZVZ as i8), 4, -(MV_JOINT_HZVNZ as i8), -(MV_JOINT_HNZVNZ as i8)];
-pub(crate) const MV_CLASS_TREE: [i8; 20] = [0, 2, -1, 4, 6, 8, -2, -3, 10, 12, -4, -5, -6, 14, 16, 18, -7, -8, -9, -10];
+pub(crate) const INTERP_FILTER_TREE: [i8; 4] = [
+    -(EIGHTTAP as i8),
+    2,
+    -(EIGHTTAP_SMOOTH as i8),
+    -(EIGHTTAP_SHARP as i8),
+];
+pub(crate) const MV_JOINT_TREE: [i8; 6] = [
+    -(MV_JOINT_ZERO as i8),
+    2,
+    -(MV_JOINT_HNZVZ as i8),
+    4,
+    -(MV_JOINT_HZVNZ as i8),
+    -(MV_JOINT_HNZVNZ as i8),
+];
+pub(crate) const MV_CLASS_TREE: [i8; 20] = [
+    0, 2, -1, 4, 6, 8, -2, -3, 10, 12, -4, -5, -6, 14, 16, 18, -7, -8, -9, -10,
+];
 pub(crate) const MV_FR_TREE: [i8; 6] = [0, 2, -1, 4, -2, -3];
-pub(crate) const TOKEN_TREE: [i8; 20] = [0, 2, -1, 4, 6, 10, -2, 8, -3, -4, 12, 14, -5, -6, 16, 18, -7, -8, -9, -10];
+pub(crate) const TOKEN_TREE: [i8; 20] = [
+    0, 2, -1, 4, 6, 10, -2, 8, -3, -4, 12, 14, -5, -6, 16, 18, -7, -8, -9, -10,
+];
 /// small_token_tree (8.4.3), adapted from index 2.
 pub(crate) const SMALL_TOKEN_TREE: [i8; 6] = [0, 0, 0, 4, -1, -2];
 pub(crate) const BINARY_TREE: [i8; 2] = [0, -1];

@@ -22,7 +22,9 @@ impl<'a> BitReader<'a> {
     pub(crate) fn bit(&mut self) -> Result<u32> {
         let byte = self.pos >> 3;
         if byte >= self.data.len() {
-            return Err(Error::bitstream("uncompressed header runs past the end of the frame"));
+            return Err(Error::bitstream(
+                "uncompressed header runs past the end of the frame",
+            ));
         }
         let b = (self.data[byte] >> (7 - (self.pos & 7))) & 1;
         self.pos += 1;

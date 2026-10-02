@@ -8,16 +8,28 @@ use vp9::{ChromaFormat, Config, Decoder, Encoder, Frame};
 
 fn psnr(a: &Frame, b: &Frame, plane: usize) -> f64 {
     let (x, y) = (a.plane(plane), b.plane(plane));
-    let se: f64 = x.iter().zip(y).map(|(&p, &q)| (p as f64 - q as f64).powi(2)).sum();
+    let se: f64 = x
+        .iter()
+        .zip(y)
+        .map(|(&p, &q)| (p as f64 - q as f64).powi(2))
+        .sum();
     let mse = se / x.len() as f64;
-    if mse == 0.0 { f64::INFINITY } else { 10.0 * (255.0f64 * 255.0 / mse).log10() }
+    if mse == 0.0 {
+        f64::INFINITY
+    } else {
+        10.0 * (255.0f64 * 255.0 / mse).log10()
+    }
 }
 
 /// The 10 frames of vp90-2-03-size-226x226.webm, decoded: natural video.
 fn natural() -> Vec<Frame> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/vp90-2-03-size-226x226.webm");
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/vp90-2-03-size-226x226.webm");
     let mut d = Decoder::new();
-    common::packets(&p).iter().filter_map(|pk| d.decode(pk).unwrap()).collect()
+    common::packets(&p)
+        .iter()
+        .filter_map(|pk| d.decode(pk).unwrap())
+        .collect()
 }
 
 fn synthetic(w: u32, h: u32, t: u32) -> Frame {
@@ -51,7 +63,11 @@ fn round_trip(cfg: Config, frames: &[Frame]) -> (Vec<Frame>, Vec<usize>) {
     for f in frames {
         let pkt = enc.encode(f).unwrap();
         sizes.push(pkt.len());
-        out.push(dec.decode(&pkt).unwrap().expect("every packet shows a frame"));
+        out.push(
+            dec.decode(&pkt)
+                .unwrap()
+                .expect("every packet shows a frame"),
+        );
     }
     (out, sizes)
 }
@@ -66,7 +82,11 @@ fn lossless_natural_is_exact() {
     for (a, b) in src.iter().zip(&out) {
         assert_eq!(a.data, b.data);
     }
-    eprintln!("lossless 226x226: {} bytes for {} frames", sizes.iter().sum::<usize>(), sizes.len());
+    eprintln!(
+        "lossless 226x226: {} bytes for {} frames",
+        sizes.iter().sum::<usize>(),
+        sizes.len()
+    );
 }
 
 #[test]
@@ -74,13 +94,34 @@ fn quality_tracks_the_quantizer() {
     let src = natural();
     let mut last_psnr = f64::INFINITY;
     let mut last_bytes = usize::MAX;
-    for (q, min_psnr) in [(16u8, 44.0), (48, 38.0), (96, 33.0), (160, 29.0), (240, 21.0)] {
+    for (q, min_psnr) in [
+        (16u8, 44.0),
+        (48, 38.0),
+        (96, 33.0),
+        (160, 29.0),
+        (240, 21.0),
+    ] {
         let mut cfg = Config::new(src[0].width, src[0].height);
         cfg.quantizer = q;
         let (out, sizes) = round_trip(cfg, &src);
-        let y: f64 = src.iter().zip(&out).map(|(a, b)| psnr(a, b, 0)).sum::<f64>() / src.len() as f64;
-        let u: f64 = src.iter().zip(&out).map(|(a, b)| psnr(a, b, 1)).sum::<f64>() / src.len() as f64;
-        let v: f64 = src.iter().zip(&out).map(|(a, b)| psnr(a, b, 2)).sum::<f64>() / src.len() as f64;
+        let y: f64 = src
+            .iter()
+            .zip(&out)
+            .map(|(a, b)| psnr(a, b, 0))
+            .sum::<f64>()
+            / src.len() as f64;
+        let u: f64 = src
+            .iter()
+            .zip(&out)
+            .map(|(a, b)| psnr(a, b, 1))
+            .sum::<f64>()
+            / src.len() as f64;
+        let v: f64 = src
+            .iter()
+            .zip(&out)
+            .map(|(a, b)| psnr(a, b, 2))
+            .sum::<f64>()
+            / src.len() as f64;
         let bytes: usize = sizes.iter().sum();
         eprintln!(
             "q {q:3}: {bytes:6} bytes ({} key, {:.0} per inter frame), PSNR Y {y:.2} U {u:.2} V {v:.2} dB",
@@ -88,7 +129,10 @@ fn quality_tracks_the_quantizer() {
             sizes[1..].iter().sum::<usize>() as f64 / (sizes.len() - 1) as f64
         );
         assert!(y > min_psnr, "q {q}: Y PSNR {y:.2} below {min_psnr}");
-        assert!(y < last_psnr && bytes < last_bytes, "q {q}: quality or size did not fall");
+        assert!(
+            y < last_psnr && bytes < last_bytes,
+            "q {q}: quality or size did not fall"
+        );
         last_psnr = y;
         last_bytes = bytes;
     }
@@ -110,7 +154,17 @@ fn inter_frames_are_cheaper_than_key_frames() {
 
 #[test]
 fn every_size_and_block_size_decodes() {
-    for (w, h) in [(1, 1), (2, 3), (8, 8), (9, 7), (17, 33), (64, 64), (65, 1), (130, 66), (200, 72)] {
+    for (w, h) in [
+        (1, 1),
+        (2, 3),
+        (8, 8),
+        (9, 7),
+        (17, 33),
+        (64, 64),
+        (65, 1),
+        (130, 66),
+        (200, 72),
+    ] {
         for bs in [8, 16, 32, 64] {
             let frames: Vec<Frame> = (0..3).map(|t| synthetic(w, h, t)).collect();
             let mut cfg = Config::new(w, h);
@@ -152,9 +206,18 @@ fn bad_input_is_refused() {
     assert!(Encoder::new(cfg).encode(&f).is_err());
     let mut enc = Encoder::new(Config::new(16, 16));
     assert!(enc.encode(&f).is_ok());
-    assert!(enc.encode(&Frame::new(32, 16, 8, ChromaFormat::Yuv420)).is_err());
-    assert!(enc.encode(&Frame::new(16, 16, 10, ChromaFormat::Yuv420)).is_err());
-    assert!(enc.encode(&Frame::new(16, 16, 8, ChromaFormat::Yuv444)).is_err());
+    assert!(
+        enc.encode(&Frame::new(32, 16, 8, ChromaFormat::Yuv420))
+            .is_err()
+    );
+    assert!(
+        enc.encode(&Frame::new(16, 16, 10, ChromaFormat::Yuv420))
+            .is_err()
+    );
+    assert!(
+        enc.encode(&Frame::new(16, 16, 8, ChromaFormat::Yuv444))
+            .is_err()
+    );
 }
 
 #[test]

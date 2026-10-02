@@ -144,8 +144,16 @@ impl Frame {
         let mut planes = Vec::with_capacity(3);
         let mut offset = 0usize;
         for i in 0..3 {
-            let (w, h) = if i == 0 { (width, height) } else { ((width + sx) >> sx, (height + sy) >> sy) };
-            planes.push(Plane { offset, width: w, height: h });
+            let (w, h) = if i == 0 {
+                (width, height)
+            } else {
+                ((width + sx) >> sx, (height + sy) >> sy)
+            };
+            planes.push(Plane {
+                offset,
+                width: w,
+                height: h,
+            });
             offset += w as usize * h as usize * bps;
         }
         Frame {

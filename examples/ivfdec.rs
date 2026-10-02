@@ -20,7 +20,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut n = 0;
     for pkt in vp9::ivf::IvfReader::new(&data)? {
         if let Some(f) = dec.decode(pkt?.data)? {
-            println!("{:x}  frame {n:05} {}x{} {}-bit {:?}", md5_hex(f.packed()), f.width, f.height, f.bit_depth, f.chroma);
+            println!(
+                "{:x}  frame {n:05} {}x{} {}-bit {:?}",
+                md5_hex(f.packed()),
+                f.width,
+                f.height,
+                f.bit_depth,
+                f.chroma
+            );
             if let Some(o) = out.as_mut() {
                 o.write_all(f.packed())?;
             }
@@ -34,10 +41,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// A tiny MD5 so the example needs nothing but this crate (RFC 1321).
 fn md5_hex(data: &[u8]) -> Md5 {
     let s: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11,
-        16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
-    let k: Vec<u32> = (0..64).map(|i| ((i as f64 + 1.0).sin().abs() * 4294967296.0) as u32).collect();
+    let k: Vec<u32> = (0..64)
+        .map(|i| ((i as f64 + 1.0).sin().abs() * 4294967296.0) as u32)
+        .collect();
     let mut h = [0x67452301u32, 0xefcdab89, 0x98badcfe, 0x10325476];
     let mut msg = data.to_vec();
     let bits = (data.len() as u64).wrapping_mul(8);
@@ -47,7 +57,10 @@ fn md5_hex(data: &[u8]) -> Md5 {
     }
     msg.extend_from_slice(&bits.to_le_bytes());
     for chunk in msg.chunks(64) {
-        let m: Vec<u32> = chunk.chunks(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+        let m: Vec<u32> = chunk
+            .chunks(4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
         let (mut a, mut b, mut c, mut d) = (h[0], h[1], h[2], h[3]);
         for i in 0..64 {
             let (f, g) = match i / 16 {
@@ -59,7 +72,12 @@ fn md5_hex(data: &[u8]) -> Md5 {
             let t = d;
             d = c;
             c = b;
-            b = b.wrapping_add(a.wrapping_add(f).wrapping_add(k[i]).wrapping_add(m[g]).rotate_left(s[i]));
+            b = b.wrapping_add(
+                a.wrapping_add(f)
+                    .wrapping_add(k[i])
+                    .wrapping_add(m[g])
+                    .rotate_left(s[i]),
+            );
             a = t;
         }
         h[0] = h[0].wrapping_add(a);

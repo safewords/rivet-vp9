@@ -133,7 +133,12 @@ mod tests {
     #[test]
     fn integer_positions_copy() {
         let d = plane();
-        let r = RefPlane { data: &d, stride: 32, last_x: 31, last_y: 31 };
+        let r = RefPlane {
+            data: &d,
+            stride: 32,
+            last_x: 31,
+            last_y: 31,
+        };
         let mut out = vec![0u16; 64];
         predict(&r, 5 * 16, 7 * 16, 16, 16, 8, 8, 0, 8, &mut out);
         for y in 0..8 {
@@ -146,7 +151,12 @@ mod tests {
     #[test]
     fn fast_path_matches_general_path() {
         let d = plane();
-        let r = RefPlane { data: &d, stride: 32, last_x: 31, last_y: 31 };
+        let r = RefPlane {
+            data: &d,
+            stride: 32,
+            last_x: 31,
+            last_y: 31,
+        };
         for filter in 0..4 {
             for frac in 0..16 {
                 let (x, y) = (8 * 16 + frac, 9 * 16 + (15 - frac));
@@ -165,7 +175,8 @@ mod tests {
                         for t in 0..8 {
                             let sy = ((y >> 4) + rr as i32 - 3).clamp(0, 31) as usize;
                             let sx = ((p >> 4) + t as i32 - 3).clamp(0, 31) as usize;
-                            s += SUBPEL_FILTERS[filter as usize][(p & 15) as usize][t] * d[sy * 32 + sx] as i32;
+                            s += SUBPEL_FILTERS[filter as usize][(p & 15) as usize][t]
+                                * d[sy * 32 + sx] as i32;
                         }
                         inter[rr * 8 + c] = ((s + 64) >> 7).clamp(0, 255);
                     }
@@ -175,7 +186,8 @@ mod tests {
                         let p = (y & 15) + 16 * rr as i32;
                         let mut s = 0;
                         for t in 0..8 {
-                            s += SUBPEL_FILTERS[filter as usize][(p & 15) as usize][t] * inter[((p >> 4) as usize + t) * 8 + c];
+                            s += SUBPEL_FILTERS[filter as usize][(p & 15) as usize][t]
+                                * inter[((p >> 4) as usize + t) * 8 + c];
                         }
                         b[rr * 8 + c] = ((s + 64) >> 7).clamp(0, 255) as u16;
                     }

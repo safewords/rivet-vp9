@@ -53,7 +53,10 @@ fn index(packet: &[u8]) -> Option<Vec<usize>> {
 
 /// Builds a superframe from `frames` (the inverse of [`split`]).
 pub fn join(frames: &[&[u8]]) -> Vec<u8> {
-    assert!(!frames.is_empty() && frames.len() <= 8, "a superframe holds 1 to 8 frames");
+    assert!(
+        !frames.is_empty() && frames.len() <= 8,
+        "a superframe holds 1 to 8 frames"
+    );
     let max = frames.iter().map(|f| f.len()).max().unwrap();
     let sz_bytes = if max < 1 << 8 {
         1

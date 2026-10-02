@@ -32,7 +32,10 @@ pub(crate) struct PlaneBuf {
 
 impl PlaneBuf {
     pub(crate) fn new(w: usize, h: usize) -> Self {
-        PlaneBuf { data: vec![0; w * h], stride: w }
+        PlaneBuf {
+            data: vec![0; w * h],
+            stride: w,
+        }
     }
 }
 
@@ -121,7 +124,12 @@ impl Decoder {
     pub fn new() -> Self {
         Decoder {
             st: Persistent::default(),
-            contexts: Box::new([Probs::default(), Probs::default(), Probs::default(), Probs::default()]),
+            contexts: Box::new([
+                Probs::default(),
+                Probs::default(),
+                Probs::default(),
+                Probs::default(),
+            ]),
             refs: Default::default(),
             prev_segment_ids: Vec::new(),
             prev_mvs: Vec::new(),
@@ -182,7 +190,10 @@ impl Decoder {
             return Ok(Some(r.to_frame()));
         }
         if h.width as u64 * h.height as u64 > self.max_pixels {
-            return Err(Error::unsupported(format!("{}x{} is above the decoder's frame size limit", h.width, h.height)));
+            return Err(Error::unsupported(format!(
+                "{}x{} is above the decoder's frame size limit",
+                h.width, h.height
+            )));
         }
         if h.header_size_in_bytes == 0 {
             return Err(Error::bitstream("compressed header of size 0"));
@@ -197,7 +208,10 @@ impl Decoder {
                 let r = self.refs[h.ref_frame_idx[i] as usize]
                     .clone()
                     .ok_or_else(|| Error::bitstream("reference to an empty slot"))?;
-                if r.ss_x != h.subsampling_x || r.ss_y != h.subsampling_y || r.bit_depth != h.bit_depth {
+                if r.ss_x != h.subsampling_x
+                    || r.ss_y != h.subsampling_y
+                    || r.bit_depth != h.bit_depth
+                {
                     return Err(Error::bitstream("reference frame of another format"));
                 }
                 active_refs[i] = Some(r);
@@ -210,8 +224,11 @@ impl Decoder {
         let first = self.last_size.is_none();
         let same_size = self.last_size == Some(size);
         let mi_len = (h.mi_rows * h.mi_cols) as usize;
-        let use_prev_frame_mvs =
-            !first && same_size && self.last_show_frame && !h.error_resilient_mode && !h.frame_is_intra;
+        let use_prev_frame_mvs = !first
+            && same_size
+            && self.last_show_frame
+            && !h.error_resilient_mode
+            && !h.frame_is_intra;
         if !same_size {
             self.prev_segment_ids = vec![0; mi_len];
         }
@@ -235,7 +252,9 @@ impl Decoder {
         let comp_start = h.uncompressed_size;
         let comp_end = comp_start + h.header_size_in_bytes as usize;
         if comp_end > data.len() {
-            return Err(Error::bitstream("compressed header runs past the end of the frame"));
+            return Err(Error::bitstream(
+                "compressed header runs past the end of the frame",
+            ));
         }
         header::parse_compressed(&data[comp_start..comp_end], &mut h, &mut probs)?;
         let mut counts = Box::<Counts>::default();
@@ -247,7 +266,11 @@ impl Decoder {
             &mut probs,
             &mut counts,
             &self.prev_segment_ids,
-            if use_prev_frame_mvs { Some(&self.prev_mvs[..]) } else { None },
+            if use_prev_frame_mvs {
+                Some(&self.prev_mvs[..])
+            } else {
+                None
+            },
             active_refs,
         );
         fd.decode_tiles(&data[comp_end..])?;
@@ -262,7 +285,12 @@ impl Decoder {
             let pre = &self.contexts[h.frame_context_idx as usize];
             let mut adapted = probs.clone();
             adapted.load_except_tx_skip(pre);
-            probs::adapt_coef_probs(&mut adapted, &counts, h.frame_is_intra, h.last_frame_type == KEY_FRAME);
+            probs::adapt_coef_probs(
+                &mut adapted,
+                &counts,
+                h.frame_is_intra,
+                h.last_frame_type == KEY_FRAME,
+            );
             if !h.frame_is_intra {
                 adapted.load_tx_skip(pre);
                 probs::adapt_noncoef_probs(
@@ -281,11 +309,15 @@ impl Decoder {
         // Segmentation map for the next frame (8.1 step 3).
         if seg.enabled && seg.update_map {
             self.prev_segment_ids.clear();
-            self.prev_segment_ids.extend(mi.iter().map(|m| m.segment_id));
+            self.prev_segment_ids
+                .extend(mi.iter().map(|m| m.segment_id));
         }
         // PrevMvs / PrevRefFrames (8.10 step 2).
         self.prev_mvs.clear();
-        self.prev_mvs.extend(mi.iter().map(|m| PrevMv { ref_frame: m.ref_frame, mv: [m.mv[0][3], m.mv[1][3]] }));
+        self.prev_mvs.extend(mi.iter().map(|m| PrevMv {
+            ref_frame: m.ref_frame,
+            mv: [m.mv[0][3], m.mv[1][3]],
+        }));
         // Reference update (8.10 step 1).
         let cur = Arc::new(RefFrame {
             width: h.width,
@@ -305,7 +337,11 @@ impl Decoder {
             }
         }
         self.frames += 1;
-        Ok(if h.show_frame { Some(cur.to_frame()) } else { None })
+        Ok(if h.show_frame {
+            Some(cur.to_frame())
+        } else {
+            None
+        })
     }
 }
 
@@ -328,13 +364,24 @@ pub(crate) fn inter_scale(ref_w: u32, ref_h: u32, w: u32, h: u32) -> Option<Scal
     if 2 * w < ref_w || 2 * h < ref_h || w > 16 * ref_w || h > 16 * ref_h {
         return None;
     }
-    Some(Scale { x_scale: ((ref_w as i64) << 14) / w as i64, y_scale: ((ref_h as i64) << 14) / h as i64 })
+    Some(Scale {
+        x_scale: ((ref_w as i64) << 14) / w as i64,
+        y_scale: ((ref_h as i64) << 14) / h as i64,
+    })
 }
 
 impl Scale {
     /// startX, startY, stepX, stepY for the region at (`x`, `y`) of a plane
     /// with the clamped motion vector `cmv`.
-    pub(crate) fn position(&self, chroma: bool, ss_x: u32, ss_y: u32, x: i64, y: i64, cmv: [i32; 2]) -> (i32, i32, i32, i32) {
+    pub(crate) fn position(
+        &self,
+        chroma: bool,
+        ss_x: u32,
+        ss_y: u32,
+        x: i64,
+        y: i64,
+        cmv: [i32; 2],
+    ) -> (i32, i32, i32, i32) {
         let base_x = (x * self.x_scale) >> 14;
         let base_y = (y * self.y_scale) >> 14;
         let luma_x = if chroma { x << ss_x } else { x };
@@ -345,7 +392,11 @@ impl Scale {
         let dy = ((cmv[0] as i64 * self.y_scale) >> 14) + frac_y;
         let step_x = (16 * self.x_scale) >> 14;
         let step_y = (16 * self.y_scale) >> 14;
-        (((base_x << 4) + dx) as i32, ((base_y << 4) + dy) as i32, step_x as i32, step_y as i32)
+        (
+            ((base_x << 4) + dx) as i32,
+            ((base_y << 4) + dy) as i32,
+            step_x as i32,
+            step_y as i32,
+        )
     }
 }
-

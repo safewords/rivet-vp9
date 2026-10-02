@@ -54,7 +54,11 @@ impl<'a> IvfReader<'a> {
             scale: le32(20),
             frames: le32(24),
         };
-        Ok(IvfReader { data, pos: header_len.max(32), header })
+        Ok(IvfReader {
+            data,
+            pos: header_len.max(32),
+            header,
+        })
     }
 
     /// The file header.
@@ -76,10 +80,15 @@ impl<'a> Iterator for IvfReader<'a> {
         let pts = u64::from_le_bytes(d[p + 4..p + 12].try_into().unwrap());
         if p + 12 + size > d.len() {
             self.pos = d.len();
-            return Some(Err(Error::InvalidInput("IVF frame runs past the end of the file".into())));
+            return Some(Err(Error::InvalidInput(
+                "IVF frame runs past the end of the file".into(),
+            )));
         }
         self.pos = p + 12 + size;
-        Some(Ok(IvfFrame { pts, data: &d[p + 12..p + 12 + size] }))
+        Some(Ok(IvfFrame {
+            pts,
+            data: &d[p + 12..p + 12 + size],
+        }))
     }
 }
 
@@ -109,7 +118,8 @@ impl IvfWriter {
 
     /// Appends a frame.
     pub fn frame(&mut self, pts: u64, data: &[u8]) {
-        self.out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        self.out
+            .extend_from_slice(&(data.len() as u32).to_le_bytes());
         self.out.extend_from_slice(&pts.to_le_bytes());
         self.out.extend_from_slice(data);
         self.frames += 1;

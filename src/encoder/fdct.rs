@@ -28,7 +28,9 @@ fn inverse_matrix(m: &Mat, n: usize) -> Mat {
         inv[i * n + i] = 1.0;
     }
     for col in 0..n {
-        let piv = (col..n).max_by(|&x, &y| a[x * n + col].abs().total_cmp(&a[y * n + col].abs())).unwrap();
+        let piv = (col..n)
+            .max_by(|&x, &y| a[x * n + col].abs().total_cmp(&a[y * n + col].abs()))
+            .unwrap();
         for k in 0..n {
             a.swap(col * n + k, piv * n + k);
             inv.swap(col * n + k, piv * n + k);
@@ -178,7 +180,9 @@ mod tests {
     use crate::dsp::itx::inverse_transform_2d;
 
     fn lcg(seed: &mut u64) -> i32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*seed >> 33) % 511) as i32 - 255
     }
 
@@ -195,7 +199,12 @@ mod tests {
                 let d = forward_2d(&res, n, tx_type);
                 let mut block: Vec<i32> = d.iter().map(|v| v.round() as i32).collect();
                 inverse_transform_2d(&mut block, n, tx_type, false);
-                let err = block.iter().zip(&res).map(|(a, b)| (a - b).abs()).max().unwrap();
+                let err = block
+                    .iter()
+                    .zip(&res)
+                    .map(|(a, b)| (a - b).abs())
+                    .max()
+                    .unwrap();
                 assert!(err <= 2, "n={n} type={tx_type}: max error {err}");
             }
         }

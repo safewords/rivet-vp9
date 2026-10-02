@@ -119,7 +119,8 @@ pub(crate) fn pareto(node: usize, prob: u8) -> u8 {
     if prob & 1 != 0 {
         PARETO_TABLE[x][node - 2]
     } else {
-        ((PARETO_TABLE[x][node - 2] as u32 + PARETO_TABLE[(x + 1).min(127)][node - 2] as u32) >> 1) as u8
+        ((PARETO_TABLE[x][node - 2] as u32 + PARETO_TABLE[(x + 1).min(127)][node - 2] as u32) >> 1)
+            as u8
     }
 }
 
@@ -136,7 +137,11 @@ impl<'a> FrameDec<'a> {
         let w = (h.sb64_cols * 64) as usize;
         let ht = (h.sb64_rows * 64) as usize;
         let (sx, sy) = (h.subsampling_x as usize, h.subsampling_y as usize);
-        let planes = [PlaneBuf::new(w, ht), PlaneBuf::new(w >> sx, ht >> sy), PlaneBuf::new(w >> sx, ht >> sy)];
+        let planes = [
+            PlaneBuf::new(w, ht),
+            PlaneBuf::new(w >> sx, ht >> sy),
+            PlaneBuf::new(w >> sx, ht >> sy),
+        ];
         let n4w = (h.sb64_cols * 16) as usize + 16;
         let n4h = (h.sb64_rows * 16) as usize + 16;
         FrameDec {
@@ -195,7 +200,12 @@ impl<'a> FrameDec<'a> {
                     if pos + 4 > data.len() {
                         return Err(Error::bitstream("tile size runs past the end of the frame"));
                     }
-                    let s = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
+                    let s = u32::from_be_bytes([
+                        data[pos],
+                        data[pos + 1],
+                        data[pos + 2],
+                        data[pos + 3],
+                    ]) as usize;
                     pos += 4;
                     s
                 };
@@ -254,13 +264,25 @@ impl<'a> FrameDec<'a> {
         let above = (above & (1 << boffset)) != 0;
         let left = (left & (1 << boffset)) != 0;
         let ctx = (bsl * 4 + left as u32 * 2 + above as u32) as usize;
-        let probs = if self.h.frame_is_intra { KF_PARTITION_PROBS[ctx] } else { self.probs.partition[ctx] };
+        let probs = if self.h.frame_is_intra {
+            KF_PARTITION_PROBS[ctx]
+        } else {
+            self.probs.partition[ctx]
+        };
         let partition = if has_rows && has_cols {
             d.tree(&PARTITION_TREE, |n| probs[n])
         } else if has_cols {
-            if d.read(probs[1]) { PARTITION_SPLIT } else { PARTITION_HORZ }
+            if d.read(probs[1]) {
+                PARTITION_SPLIT
+            } else {
+                PARTITION_HORZ
+            }
         } else if has_rows {
-            if d.read(probs[2]) { PARTITION_SPLIT } else { PARTITION_VERT }
+            if d.read(probs[2]) {
+                PARTITION_SPLIT
+            } else {
+                PARTITION_VERT
+            }
         } else {
             PARTITION_SPLIT
         };
@@ -309,7 +331,9 @@ impl<'a> FrameDec<'a> {
         if self.ss_x + self.ss_y > 0 && subsize >= BLOCK_8X8 {
             let uv = SS_SIZE_LOOKUP[subsize as usize][self.ss_x as usize][self.ss_y as usize];
             if uv == BLOCK_INVALID {
-                return Err(Error::bitstream("block size invalid for the chroma subsampling"));
+                return Err(Error::bitstream(
+                    "block size invalid for the chroma subsampling",
+                ));
             }
         }
         let avail_u = r > 0;
@@ -320,8 +344,16 @@ impl<'a> FrameDec<'a> {
             mi_size: subsize,
             avail_u,
             avail_l,
-            above: if avail_u { Some(*self.mi_at(r - 1, c)) } else { None },
-            left: if avail_l { Some(*self.mi_at(r, c - 1)) } else { None },
+            above: if avail_u {
+                Some(*self.mi_at(r - 1, c))
+            } else {
+                None
+            },
+            left: if avail_l {
+                Some(*self.mi_at(r, c - 1))
+            } else {
+                None
+            },
             ..Block::default()
         };
         if self.h.frame_is_intra {
@@ -362,8 +394,11 @@ impl<'a> FrameDec<'a> {
 
     fn intra_frame_mode_info(&mut self, d: &mut BoolDecoder) {
         // intra_segment_id()
-        self.b.segment_id =
-            if self.seg.enabled && self.seg.update_map { d.tree(&SEGMENT_TREE, |n| self.seg.tree_probs[n]) } else { 0 };
+        self.b.segment_id = if self.seg.enabled && self.seg.update_map {
+            d.tree(&SEGMENT_TREE, |n| self.seg.tree_probs[n])
+        } else {
+            0
+        };
         self.read_skip(d);
         self.read_tx_size(d, true);
         self.b.ref_frame = [INTRA_FRAME, NONE];
@@ -385,9 +420,16 @@ impl<'a> FrameDec<'a> {
             while idy < 2 {
                 let mut idx = 0;
                 while idx < 2 {
-                    let am = if idy > 0 { self.b.sub_modes[idx] } else { above.map_or(DC_PRED, |m| m.sub_modes[2 + idx]) };
-                    let lm =
-                        if idx > 0 { self.b.sub_modes[idy * 2] } else { left.map_or(DC_PRED, |m| m.sub_modes[1 + idy * 2]) };
+                    let am = if idy > 0 {
+                        self.b.sub_modes[idx]
+                    } else {
+                        above.map_or(DC_PRED, |m| m.sub_modes[2 + idx])
+                    };
+                    let lm = if idx > 0 {
+                        self.b.sub_modes[idy * 2]
+                    } else {
+                        left.map_or(DC_PRED, |m| m.sub_modes[1 + idy * 2])
+                    };
                     let p = &KF_Y_MODE_PROBS[am as usize][lm as usize];
                     mode = d.tree(&INTRA_MODE_TREE, |n| p[n]);
                     for y2 in 0..n4h {
@@ -409,7 +451,8 @@ impl<'a> FrameDec<'a> {
         if self.seg.active(self.b.segment_id, SEG_LVL_SKIP) {
             self.b.skip = true;
         } else {
-            let ctx = self.b.above.map_or(0, |m| m.skip as usize) + self.b.left.map_or(0, |m| m.skip as usize);
+            let ctx = self.b.above.map_or(0, |m| m.skip as usize)
+                + self.b.left.map_or(0, |m| m.skip as usize);
             self.b.skip = d.read(self.probs.skip[ctx]);
             self.counts.skip[ctx][self.b.skip as usize] += 1;
         }
@@ -491,9 +534,14 @@ impl<'a> FrameDec<'a> {
             return;
         }
         if self.seg.temporal_update {
-            let ctx = (self.left_seg_pred[self.b.mi_row as usize] + self.above_seg_pred[self.b.mi_col as usize]) as usize;
+            let ctx = (self.left_seg_pred[self.b.mi_row as usize]
+                + self.above_seg_pred[self.b.mi_col as usize]) as usize;
             let pred = d.read(self.seg.pred_probs[ctx]);
-            self.b.segment_id = if pred { predicted } else { d.tree(&SEGMENT_TREE, |n| self.seg.tree_probs[n]) };
+            self.b.segment_id = if pred {
+                predicted
+            } else {
+                d.tree(&SEGMENT_TREE, |n| self.seg.tree_probs[n])
+            };
             let bw = NUM_8X8_WIDE[self.b.mi_size as usize] as usize;
             let bh = NUM_8X8_HIGH[self.b.mi_size as usize] as usize;
             for i in 0..bw {
@@ -517,13 +565,18 @@ impl<'a> FrameDec<'a> {
 
     fn read_is_inter(&mut self, d: &mut BoolDecoder) {
         if self.seg.active(self.b.segment_id, SEG_LVL_REF_FRAME) {
-            self.b.is_inter = self.seg.feature_data[self.b.segment_id as usize][SEG_LVL_REF_FRAME] != INTRA_FRAME as i16;
+            self.b.is_inter = self.seg.feature_data[self.b.segment_id as usize][SEG_LVL_REF_FRAME]
+                != INTRA_FRAME as i16;
         } else {
             let left_intra = self.left_ref()[0] <= INTRA_FRAME;
             let above_intra = self.above_ref()[0] <= INTRA_FRAME;
             let (au, al) = (self.b.avail_u, self.b.avail_l);
             let ctx = if au && al {
-                if left_intra && above_intra { 3 } else { (left_intra || above_intra) as usize }
+                if left_intra && above_intra {
+                    3
+                } else {
+                    (left_intra || above_intra) as usize
+                }
             } else if au || al {
                 2 * (if au { above_intra } else { left_intra }) as usize
             } else {
@@ -587,9 +640,16 @@ impl<'a> FrameDec<'a> {
         if self.h.interpolation_filter == SWITCHABLE {
             let left = self.left_ref();
             let above = self.above_ref();
-            let left_interp = if self.b.avail_l && left[0] > INTRA_FRAME { self.b.left.unwrap().interp_filter } else { 3 };
-            let above_interp =
-                if self.b.avail_u && above[0] > INTRA_FRAME { self.b.above.unwrap().interp_filter } else { 3 };
+            let left_interp = if self.b.avail_l && left[0] > INTRA_FRAME {
+                self.b.left.unwrap().interp_filter
+            } else {
+                3
+            };
+            let above_interp = if self.b.avail_u && above[0] > INTRA_FRAME {
+                self.b.above.unwrap().interp_filter
+            } else {
+                3
+            };
             let ctx = if left_interp == above_interp {
                 left_interp
             } else if left_interp == 3 && above_interp != 3 {
@@ -653,7 +713,9 @@ impl<'a> FrameDec<'a> {
         if self.seg.active(self.b.segment_id, SEG_LVL_REF_FRAME) {
             let rf = self.seg.feature_data[self.b.segment_id as usize][SEG_LVL_REF_FRAME];
             if !(1..=3).contains(&rf) {
-                return Err(Error::bitstream("segment reference feature names no inter frame"));
+                return Err(Error::bitstream(
+                    "segment reference feature names no inter frame",
+                ));
             }
             self.b.ref_frame = [rf as i8, NONE];
             return Ok(());
@@ -662,7 +724,11 @@ impl<'a> FrameDec<'a> {
             let ctx = self.comp_mode_ctx();
             let v = d.read(self.probs.comp_mode[ctx]);
             self.counts.comp_mode[ctx][v as usize] += 1;
-            if v { COMPOUND_REFERENCE } else { SINGLE_REFERENCE }
+            if v {
+                COMPOUND_REFERENCE
+            } else {
+                SINGLE_REFERENCE
+            }
         } else {
             self.h.reference_mode
         };
@@ -710,9 +776,17 @@ impl<'a> FrameDec<'a> {
                 4
             }
         } else if au {
-            if a_single { (a[0] == fixed) as usize } else { 3 }
+            if a_single {
+                (a[0] == fixed) as usize
+            } else {
+                3
+            }
         } else if al {
-            if l_single { (l[0] == fixed) as usize } else { 3 }
+            if l_single {
+                (l[0] == fixed) as usize
+            } else {
+                3
+            }
         } else {
             1
         }
@@ -735,9 +809,17 @@ impl<'a> FrameDec<'a> {
             if a_intra && l_intra {
                 2
             } else if l_intra {
-                if a_single { 1 + 2 * (a[0] != var1) as usize } else { 1 + 2 * (a[var_ref_idx] != var1) as usize }
+                if a_single {
+                    1 + 2 * (a[0] != var1) as usize
+                } else {
+                    1 + 2 * (a[var_ref_idx] != var1) as usize
+                }
             } else if a_intra {
-                if l_single { 1 + 2 * (l[0] != var1) as usize } else { 1 + 2 * (l[var_ref_idx] != var1) as usize }
+                if l_single {
+                    1 + 2 * (l[0] != var1) as usize
+                } else {
+                    1 + 2 * (l[var_ref_idx] != var1) as usize
+                }
             } else {
                 let vrfa = if a_single { a[0] } else { a[var_ref_idx] };
                 let vrfl = if l_single { l[0] } else { l[var_ref_idx] };
@@ -801,9 +883,17 @@ impl<'a> FrameDec<'a> {
             if a_intra && l_intra {
                 2
             } else if l_intra {
-                if a_single { 4 * (a[0] == LF) as usize } else { 1 + (a[0] == LF || a[1] == LF) as usize }
+                if a_single {
+                    4 * (a[0] == LF) as usize
+                } else {
+                    1 + (a[0] == LF || a[1] == LF) as usize
+                }
             } else if a_intra {
-                if l_single { 4 * (l[0] == LF) as usize } else { 1 + (l[0] == LF || l[1] == LF) as usize }
+                if l_single {
+                    4 * (l[0] == LF) as usize
+                } else {
+                    1 + (l[0] == LF || l[1] == LF) as usize
+                }
             } else if a_single && l_single {
                 2 * (a[0] == LF) as usize + 2 * (l[0] == LF) as usize
             } else if !a_single && !l_single {
@@ -812,7 +902,11 @@ impl<'a> FrameDec<'a> {
                 let rfs = if a_single { a[0] } else { l[0] };
                 let crf1 = if a_single { l[0] } else { a[0] };
                 let crf2 = if a_single { l[1] } else { a[1] };
-                if rfs == LF { 3 + (crf1 == LF || crf2 == LF) as usize } else { (crf1 == LF || crf2 == LF) as usize }
+                if rfs == LF {
+                    3 + (crf1 == LF || crf2 == LF) as usize
+                } else {
+                    (crf1 == LF || crf2 == LF) as usize
+                }
             }
         } else if au {
             if a_intra {
@@ -851,13 +945,21 @@ impl<'a> FrameDec<'a> {
                 2
             } else if l_intra {
                 if a_single {
-                    if a[0] == LF { 3 } else { 4 * (a[0] == GF) as usize }
+                    if a[0] == LF {
+                        3
+                    } else {
+                        4 * (a[0] == GF) as usize
+                    }
                 } else {
                     1 + 2 * (a[0] == GF || a[1] == GF) as usize
                 }
             } else if a_intra {
                 if l_single {
-                    if l[0] == LF { 3 } else { 4 * (l[0] == GF) as usize }
+                    if l[0] == LF {
+                        3
+                    } else {
+                        4 * (l[0] == GF) as usize
+                    }
                 } else {
                     1 + 2 * (l[0] == GF || l[1] == GF) as usize
                 }
@@ -872,7 +974,11 @@ impl<'a> FrameDec<'a> {
                     2 * (a[0] == GF) as usize + 2 * (l[0] == GF) as usize
                 }
             } else if !a_single && !l_single {
-                if a[0] == l[0] && a[1] == l[1] { 3 * (a[0] == GF || a[1] == GF) as usize } else { 2 }
+                if a[0] == l[0] && a[1] == l[1] {
+                    3 * (a[0] == GF || a[1] == GF) as usize
+                } else {
+                    2
+                }
             } else {
                 let rfs = if a_single { a[0] } else { l[0] };
                 let crf1 = if a_single { l[0] } else { a[0] };
@@ -946,7 +1052,11 @@ impl<'a> FrameDec<'a> {
             let pf = self.probs.mv_class0_fr[comp][c0 as usize];
             let fr = d.tree(&MV_FR_TREE, |n| pf[n]) as i32;
             self.counts.mv_class0_fr[comp][c0 as usize][fr as usize] += 1;
-            let hp = if use_hp { d.read(self.probs.mv_class0_hp[comp]) as i32 } else { 1 };
+            let hp = if use_hp {
+                d.read(self.probs.mv_class0_hp[comp]) as i32
+            } else {
+                1
+            };
             self.counts.mv_class0_hp[comp][hp as usize] += 1;
             ((c0 << 3) | (fr << 1) | hp) + 1
         } else {
@@ -960,7 +1070,11 @@ impl<'a> FrameDec<'a> {
             let pf = self.probs.mv_fr[comp];
             let fr = d.tree(&MV_FR_TREE, |n| pf[n]) as i32;
             self.counts.mv_fr[comp][fr as usize] += 1;
-            let hp = if use_hp { d.read(self.probs.mv_hp[comp]) as i32 } else { 1 };
+            let hp = if use_hp {
+                d.read(self.probs.mv_hp[comp]) as i32
+            } else {
+                1
+            };
             self.counts.mv_hp[comp][hp as usize] += 1;
             mag + ((dd << 3) | (fr << 1) | hp) + 1
         };
@@ -971,11 +1085,23 @@ impl<'a> FrameDec<'a> {
     // Residual (6.4.21 - 6.4.26).
 
     fn residual(&mut self, d: &mut BoolDecoder) -> Result<()> {
-        let bsize = if self.b.mi_size < BLOCK_8X8 { BLOCK_8X8 } else { self.b.mi_size };
+        let bsize = if self.b.mi_size < BLOCK_8X8 {
+            BLOCK_8X8
+        } else {
+            self.b.mi_size
+        };
         for plane in 0..3usize {
-            let tx_sz = if plane > 0 { self.uv_tx_size() } else { self.b.tx_size };
+            let tx_sz = if plane > 0 {
+                self.uv_tx_size()
+            } else {
+                self.b.tx_size
+            };
             let step = 1usize << tx_sz;
-            let (sx, sy) = if plane > 0 { (self.ss_x, self.ss_y) } else { (0, 0) };
+            let (sx, sy) = if plane > 0 {
+                (self.ss_x, self.ss_y)
+            } else {
+                (0, 0)
+            };
             let plane_sz = SS_SIZE_LOOKUP[bsize as usize][sx as usize][sy as usize];
             if plane_sz == BLOCK_INVALID {
                 return Err(Error::bitstream("invalid chroma block size"));
@@ -988,7 +1114,14 @@ impl<'a> FrameDec<'a> {
                 if self.b.mi_size < BLOCK_8X8 {
                     for y in 0..n4h {
                         for x in 0..n4w {
-                            self.predict_inter(plane, base_x + 4 * x, base_y + 4 * y, 4, 4, y * n4w + x)?;
+                            self.predict_inter(
+                                plane,
+                                base_x + 4 * x,
+                                base_y + 4 * y,
+                                4,
+                                4,
+                                y * n4w + x,
+                            )?;
                         }
                     }
                 } else {
@@ -1019,7 +1152,8 @@ impl<'a> FrameDec<'a> {
                             );
                         }
                         if !self.b.skip {
-                            let (eob, tx_type) = self.tokens(d, plane, start_x, start_y, tx_sz, block_idx);
+                            let (eob, tx_type) =
+                                self.tokens(d, plane, start_x, start_y, tx_sz, block_idx);
                             nonzero = eob > 0;
                             if eob > 0 {
                                 self.reconstruct(plane, start_x, start_y, tx_sz, tx_type, eob);
@@ -1058,7 +1192,11 @@ impl<'a> FrameDec<'a> {
             if self.h.lossless || self.b.is_inter {
                 DCT_DCT
             } else {
-                MODE2TXFM_MAP[if self.b.mi_size < BLOCK_8X8 { self.b.sub_modes[block_idx] } else { self.b.y_mode } as usize]
+                MODE2TXFM_MAP[if self.b.mi_size < BLOCK_8X8 {
+                    self.b.sub_modes[block_idx]
+                } else {
+                    self.b.y_mode
+                } as usize]
             }
         } else {
             MODE2TXFM_MAP[self.b.y_mode as usize]
@@ -1067,7 +1205,15 @@ impl<'a> FrameDec<'a> {
 
     /// tokens() (6.4.24): reads the coefficients of one transform block into
     /// `self.coefs` (in raster order). Returns the end of block and TxType.
-    fn tokens(&mut self, d: &mut BoolDecoder, plane: usize, start_x: usize, start_y: usize, tx_sz: u8, block_idx: usize) -> (usize, u8) {
+    fn tokens(
+        &mut self,
+        d: &mut BoolDecoder,
+        plane: usize,
+        start_x: usize,
+        start_y: usize,
+        tx_sz: u8,
+        block_idx: usize,
+    ) -> (usize, u8) {
         let seg_eob = 16usize << (tx_sz << 1);
         let tx_type = self.tx_type(plane, tx_sz, block_idx);
         let scan: &[u16] = match (tx_sz, tx_type) {
@@ -1086,7 +1232,11 @@ impl<'a> FrameDec<'a> {
         let ptype = (plane > 0) as usize;
         let txs = tx_sz as usize;
         // Context of the first coefficient.
-        let (sx, sy) = if plane > 0 { (self.ss_x, self.ss_y) } else { (0, 0) };
+        let (sx, sy) = if plane > 0 {
+            (self.ss_x, self.ss_y)
+        } else {
+            (0, 0)
+        };
         let max_x4 = ((2 * self.mi_cols) >> sx) as usize;
         let max_y4 = ((2 * self.mi_rows) >> sy) as usize;
         let x4 = start_x >> 2;
@@ -1109,7 +1259,11 @@ impl<'a> FrameDec<'a> {
         let bd = self.bit_depth;
         while c < seg_eob {
             let pos = scan[c] as usize;
-            let band = if tx_sz == TX_4X4 { COEFBAND_4X4[c] } else { COEFBAND_8X8PLUS[c] } as usize;
+            let band = if tx_sz == TX_4X4 {
+                COEFBAND_4X4[c]
+            } else {
+                COEFBAND_8X8PLUS[c]
+            } as usize;
             if c > 0 {
                 // Neighbour context.
                 let i = pos >> log2n;

@@ -19,7 +19,11 @@ fn lvl_lookup(lf: &LoopFilter, seg: &Segmentation) -> [[[u8; 2]; 4]; MAX_SEGMENT
         let mut lvl_seg = lf.level as i32;
         if seg.active(segment_id as u8, SEG_LVL_ALT_L) {
             let data = seg.feature_data[segment_id][SEG_LVL_ALT_L] as i32;
-            lvl_seg = if seg.abs_or_delta_update { data } else { data + lf.level as i32 };
+            lvl_seg = if seg.abs_or_delta_update {
+                data
+            } else {
+                data + lf.level as i32
+            };
             lvl_seg = lvl_seg.clamp(0, MAX_LOOP_FILTER);
         }
         if !lf.delta_enabled {
@@ -31,7 +35,9 @@ fn lvl_lookup(lf: &LoopFilter, seg: &Segmentation) -> [[[u8; 2]; 4]; MAX_SEGMENT
             o[0] = [intra.clamp(0, MAX_LOOP_FILTER) as u8; 2];
             for rf in 1..4 {
                 for mode in 0..2 {
-                    let inter = lvl_seg + ((lf.ref_deltas[rf] as i32) << n_shift) + ((lf.mode_deltas[mode] as i32) << n_shift);
+                    let inter = lvl_seg
+                        + ((lf.ref_deltas[rf] as i32) << n_shift)
+                        + ((lf.mode_deltas[mode] as i32) << n_shift);
                     o[rf][mode] = inter.clamp(0, MAX_LOOP_FILTER) as u8;
                 }
             }
@@ -41,7 +47,13 @@ fn lvl_lookup(lf: &LoopFilter, seg: &Segmentation) -> [[[u8; 2]; 4]; MAX_SEGMENT
 }
 
 /// Applies the loop filter to the frame.
-pub(crate) fn filter_frame(h: &FrameHeader, lf: &LoopFilter, seg: &Segmentation, mi: &[MiInfo], planes: &mut [PlaneBuf; 3]) {
+pub(crate) fn filter_frame(
+    h: &FrameHeader,
+    lf: &LoopFilter,
+    seg: &Segmentation,
+    mi: &[MiInfo],
+    planes: &mut [PlaneBuf; 3],
+) {
     let lvl = lvl_lookup(lf, seg);
     let shift = if lf.sharpness > 4 {
         2
@@ -54,7 +66,11 @@ pub(crate) fn filter_frame(h: &FrameHeader, lf: &LoopFilter, seg: &Segmentation,
     let mut params = [(0i32, 0i32, 0i32); 64];
     for (l, p) in params.iter_mut().enumerate() {
         let l = l as i32;
-        let limit = if lf.sharpness > 0 { (l >> shift).clamp(1, 9 - lf.sharpness as i32) } else { (l >> shift).max(1) };
+        let limit = if lf.sharpness > 0 {
+            (l >> shift).clamp(1, 9 - lf.sharpness as i32)
+        } else {
+            (l >> shift).max(1)
+        };
         *p = (limit, 2 * (l + 2) + limit, l >> 4);
     }
     let mi_rows = h.mi_rows;
@@ -86,8 +102,16 @@ fn superblock(
     row: u32,
     col: u32,
 ) {
-    let (sub_x, sub_y) = if plane > 0 { (h.subsampling_x, h.subsampling_y) } else { (0, 0) };
-    let (sub, edge_len) = if pass == 0 { (sub_x, 64 >> sub_y) } else { (sub_y, 64 >> sub_x) };
+    let (sub_x, sub_y) = if plane > 0 {
+        (h.subsampling_x, h.subsampling_y)
+    } else {
+        (0, 0)
+    };
+    let (sub, edge_len) = if pass == 0 {
+        (sub_x, 64 >> sub_y)
+    } else {
+        (sub_y, 64 >> sub_x)
+    };
     let mi_rows = h.mi_rows;
     let mi_cols = h.mi_cols;
     let stride = buf.stride;
@@ -103,7 +127,11 @@ fn superblock(
                 (col * 8 + (i << sub_x), row * 8 + edge * (4 << sub_y))
             };
             // onScreen (step 13).
-            if x >= 8 * mi_cols || y >= 8 * mi_rows || (pass == 0 && x == 0) || (pass == 1 && y == 0) {
+            if x >= 8 * mi_cols
+                || y >= 8 * mi_rows
+                || (pass == 0 && x == 0)
+                || (pass == 1 && y == 0)
+            {
                 continue;
             }
             let loop_col = ((x >> 3) >> sub_x) << sub_x;
@@ -114,20 +142,30 @@ fn superblock(
                 if mi_size < BLOCK_8X8 {
                     TX_4X4
                 } else {
-                    let uv = SS_SIZE_LOOKUP[mi_size as usize][h.subsampling_x as usize][h.subsampling_y as usize];
+                    let uv = SS_SIZE_LOOKUP[mi_size as usize][h.subsampling_x as usize]
+                        [h.subsampling_y as usize];
                     m.tx_size.min(MAX_TXSIZE_LOOKUP[uv as usize])
                 }
             } else {
                 m.tx_size
             };
-            let sb_size = if sub == 0 { mi_size } else { mi_size.max(BLOCK_16X16) };
+            let sb_size = if sub == 0 {
+                mi_size
+            } else {
+                mi_size.max(BLOCK_16X16)
+            };
             let is_intra = m.ref_frame[0] <= INTRA_FRAME;
             let is_block_edge = if pass == 0 {
                 x % (8 * NUM_8X8_WIDE[sb_size as usize] as u32) == 0
             } else {
                 y % (8 * NUM_8X8_HIGH[sb_size as usize] as u32) == 0
             };
-            let is_tx_edge = if pass == 1 && sub_x == 1 && mi_cols & 1 == 1 && edge & 1 == 1 && (x + 8) >= mi_cols * 8 {
+            let is_tx_edge = if pass == 1
+                && sub_x == 1
+                && mi_cols & 1 == 1
+                && edge & 1 == 1
+                && (x + 8) >= mi_cols * 8
+            {
                 false
             } else {
                 edge % (1 << tx_sz) == 0
@@ -138,14 +176,19 @@ fn superblock(
                 continue;
             }
             // Filter size (8.8.3).
-            let base_size = if tx_sz == TX_4X4 && is_32_edge { TX_8X8 } else { tx_sz.min(TX_16X16) };
-            let filter_size = if (pass == 0 && sub_x == 1 && base_size == TX_16X16 && (x >> 3) == mi_cols - 1)
-                || (pass == 1 && sub_y == 1 && base_size == TX_16X16 && (y >> 3) == mi_rows - 1)
-            {
+            let base_size = if tx_sz == TX_4X4 && is_32_edge {
                 TX_8X8
             } else {
-                base_size
+                tx_sz.min(TX_16X16)
             };
+            let filter_size =
+                if (pass == 0 && sub_x == 1 && base_size == TX_16X16 && (x >> 3) == mi_cols - 1)
+                    || (pass == 1 && sub_y == 1 && base_size == TX_16X16 && (y >> 3) == mi_rows - 1)
+                {
+                    TX_8X8
+                } else {
+                    base_size
+                };
             // Adaptive filter strength (8.8.4).
             let mode = m.y_mode;
             let mode_type = (mode == NEARESTMV || mode == NEARMV || mode == NEWMV) as usize;
@@ -158,7 +201,16 @@ fn superblock(
             let pos = (y >> sub_y) as usize * stride + (x >> sub_x) as usize;
             let along = if pass == 0 { stride } else { 1 };
             for k in 0..4 {
-                lf::filter(&mut buf.data, pos + k * along, step, filter_size, limit, blimit, thresh, h.bit_depth);
+                lf::filter(
+                    &mut buf.data,
+                    pos + k * along,
+                    step,
+                    filter_size,
+                    limit,
+                    blimit,
+                    thresh,
+                    h.bit_depth,
+                );
             }
         }
     }

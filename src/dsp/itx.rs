@@ -106,7 +106,13 @@ fn idct_core(t: &mut [i64], n: u32) {
     if n == 5 {
         for i in 0..2 {
             for j in 0..2 {
-                bfly(t, n0 - nn + 3 - n2 * j - 4 * i, n1 + nn - 4 + n2 * j + 4 * i, 28 - 16 * i as i32 + 56 * j as i32, true);
+                bfly(
+                    t,
+                    n0 - nn + 3 - n2 * j - 4 * i,
+                    n1 + nn - 4 + n2 * j + 4 * i,
+                    28 - 16 * i as i32 + 56 * j as i32,
+                    true,
+                );
             }
         }
         for i in 0..2 {
@@ -119,7 +125,13 @@ fn idct_core(t: &mut [i64], n: u32) {
         let imax = if n == 5 { 1 } else { 0 };
         for i in 0..=imax {
             for j in 0..2 {
-                bfly(t, n0 - nn + 2 - i - n2 * j, n1 + nn - 3 + i + n2 * j, 24 + 48 * j as i32, true);
+                bfly(
+                    t,
+                    n0 - nn + 2 - i - n2 * j,
+                    n1 + nn - 3 + i + n2 * j,
+                    24 + 48 * j as i32,
+                    true,
+                );
             }
         }
         for i in 0..(2 * nn - 6) {
@@ -168,7 +180,8 @@ fn adst_out_perm(t: &mut [i64], n: u32) {
             for b in 0..2 {
                 for c in 0..2 {
                     for d in 0..2 {
-                        t[8 * a + 4 * b + 2 * c + d] = copy[8 * (d ^ c) + 4 * (c ^ b) + 2 * (b ^ a) + a];
+                        t[8 * a + 4 * b + 2 * c + d] =
+                            copy[8 * (d ^ c) + 4 * (c ^ b) + 2 * (b ^ a) + a];
                     }
                 }
             }
@@ -256,7 +269,14 @@ fn iadst16(t: &mut [i64]) {
     }
     for i in 0..2 {
         for j in 0..2 {
-            sbfly(t, &mut s, 4 + 8 * i + 3 * j, 5 + 8 * i + j, 24 - 16 * j as i32, true);
+            sbfly(
+                t,
+                &mut s,
+                4 + 8 * i + 3 * j,
+                5 + 8 * i + j,
+                24 - 16 * j as i32,
+                true,
+            );
         }
     }
     for i in 0..2 {
@@ -271,7 +291,13 @@ fn iadst16(t: &mut [i64]) {
     }
     for i in 0..2 {
         for j in 0..2 {
-            bfly(t, 2 + 4 * j + 8 * i, 3 + 4 * j + 8 * i, 48 + 64 * (i ^ j) as i32, false);
+            bfly(
+                t,
+                2 + 4 * j + 8 * i,
+                3 + 4 * j + 8 * i,
+                48 + 64 * (i ^ j) as i32,
+                false,
+            );
         }
     }
     adst_out_perm(t, 4);
@@ -352,7 +378,11 @@ pub(crate) fn inverse_transform_2d(block: &mut [i32], n: u32, tx_type: u8, lossl
             iadst(&mut t, n);
         }
         for i in 0..n0 {
-            block[i * n0 + j] = if lossless { t[i] as i32 } else { ((t[i] + (1 << (shift - 1))) >> shift) as i32 };
+            block[i * n0 + j] = if lossless {
+                t[i] as i32
+            } else {
+                ((t[i] + (1 << (shift - 1))) >> shift) as i32
+            };
         }
     }
 }
@@ -363,7 +393,9 @@ mod tests {
     use std::f64::consts::PI;
 
     fn lcg(seed: &mut u64) -> i64 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((*seed >> 33) % 2001) as i64 - 1000
     }
 
@@ -394,7 +426,12 @@ mod tests {
                 idct(&mut t, n);
                 let r = ref_idct(&x.iter().map(|&v| v as f64).collect::<Vec<_>>());
                 for k in 0..n0 {
-                    assert!((t[k] as f64 - r[k]).abs() <= n as f64 + 1.0, "n={n} k={k}: {} vs {}", t[k], r[k]);
+                    assert!(
+                        (t[k] as f64 - r[k]).abs() <= n as f64 + 1.0,
+                        "n={n} k={k}: {} vs {}",
+                        t[k],
+                        r[k]
+                    );
                 }
             }
         }
@@ -409,11 +446,22 @@ mod tests {
             // the constants are round(16384 * sqrt(2) * 2/3 * sin(i pi / 9)).
             let c = (2.0 / 3.0) * 2f64.sqrt();
             (0..4)
-                .map(|k| (0..4).map(|f| x[f] * c * (((2 * f + 1) * (k + 1)) as f64 * PI / 9.0).sin()).sum())
+                .map(|k| {
+                    (0..4)
+                        .map(|f| x[f] * c * (((2 * f + 1) * (k + 1)) as f64 * PI / 9.0).sin())
+                        .sum()
+                })
                 .collect()
         } else {
             (0..n)
-                .map(|k| (0..n).map(|f| x[f] * ((2 * k + 1) as f64 * (2 * f + 1) as f64 * PI / (4 * n) as f64).sin()).sum())
+                .map(|k| {
+                    (0..n)
+                        .map(|f| {
+                            x[f] * ((2 * k + 1) as f64 * (2 * f + 1) as f64 * PI / (4 * n) as f64)
+                                .sin()
+                        })
+                        .sum()
+                })
                 .collect()
         }
     }
@@ -429,7 +477,12 @@ mod tests {
                 iadst(&mut t, n);
                 let r = ref_iadst(&x.iter().map(|&v| v as f64).collect::<Vec<_>>());
                 for k in 0..n0 {
-                    assert!((t[k] as f64 - r[k]).abs() <= n as f64 + 2.0, "n={n} k={k}: {} vs {}", t[k], r[k]);
+                    assert!(
+                        (t[k] as f64 - r[k]).abs() <= n as f64 + 2.0,
+                        "n={n} k={k}: {} vs {}",
+                        t[k],
+                        r[k]
+                    );
                 }
             }
         }

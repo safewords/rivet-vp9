@@ -75,7 +75,9 @@ impl Config {
     /// invalid configuration and returns this error.
     pub fn validate(&self) -> Result<()> {
         if self.width == 0 || self.height == 0 || self.width > 65536 || self.height > 65536 {
-            return Err(Error::invalid("frame size must be 1 to 65536 in each direction"));
+            return Err(Error::invalid(
+                "frame size must be 1 to 65536 in each direction",
+            ));
         }
         if ![8, 16, 32, 64].contains(&self.block_size) {
             return Err(Error::invalid("block_size must be 8, 16, 32 or 64"));
@@ -102,7 +104,12 @@ impl Encoder {
     pub fn new(cfg: Config) -> Self {
         let mut dec = Decoder::new();
         dec.set_max_pixels(cfg.width as u64 * cfg.height as u64);
-        Encoder { cfg, frames: 0, force_key: true, dec }
+        Encoder {
+            cfg,
+            frames: 0,
+            force_key: true,
+            dec,
+        }
     }
 
     /// The configuration.
@@ -125,7 +132,9 @@ impl Encoder {
             )));
         }
         if frame.bit_depth != 8 || frame.chroma != ChromaFormat::Yuv420 {
-            return Err(Error::unsupported("the encoder writes profile 0 only: 8-bit 4:2:0"));
+            return Err(Error::unsupported(
+                "the encoder writes profile 0 only: 8-bit 4:2:0",
+            ));
         }
         let interval = self.cfg.keyframe_interval.max(1) as u64;
         let key = self.force_key || self.frames.is_multiple_of(interval);
@@ -139,7 +148,11 @@ impl Encoder {
             let seg = Segmentation::default();
             let mut probs = Probs::default();
             let mut counts = Box::<Counts>::default();
-            let refs: [Option<Arc<RefFrame>>; 3] = if key { Default::default() } else { [last.clone(), last.clone(), last.clone()] };
+            let refs: [Option<Arc<RefFrame>>; 3] = if key {
+                Default::default()
+            } else {
+                [last.clone(), last.clone(), last.clone()]
+            };
             let mut fd = FrameDec::new(&h, &seg, &mut probs, &mut counts, &[], None, refs);
             let src = tile::Source::new(frame, &h);
             let mut te = tile::TileEncoder::new(&self.cfg, &h, &src, last.as_deref());
@@ -155,10 +168,11 @@ impl Encoder {
         packet.extend_from_slice(&comp);
         packet.extend_from_slice(&tiles);
         // Keep the references a decoder will have.
-        let out = self
-            .dec
-            .decode(&packet)
-            .map_err(|e| Error::invalid(format!("internal error: the encoder's own frame does not decode: {e}")))?;
+        let out = self.dec.decode(&packet).map_err(|e| {
+            Error::invalid(format!(
+                "internal error: the encoder's own frame does not decode: {e}"
+            ))
+        })?;
         // Debug builds check that the encoder reconstructed exactly what the
         // decoder decodes (without a loop filter the two are comparable).
         if let (Some(planes), Some(out)) = (recon, out) {
@@ -186,7 +200,11 @@ impl Encoder {
             return l.min(63);
         }
         let q = self.cfg.quantizer as u32;
-        if q == 0 { 0 } else { ((q * 10 + 32) / 64).min(63) as u8 }
+        if q == 0 {
+            0
+        } else {
+            ((q * 10 + 32) / 64).min(63) as u8
+        }
     }
 
     /// The header both the writer and the reconstruction use.
@@ -234,7 +252,12 @@ impl Encoder {
         }
     }
 
-    fn uncompressed_header(&self, w: &mut BitWriter, h: &FrameHeader, comp_len: usize) -> Result<()> {
+    fn uncompressed_header(
+        &self,
+        w: &mut BitWriter,
+        h: &FrameHeader,
+        comp_len: usize,
+    ) -> Result<()> {
         if comp_len >= 1 << 16 {
             return Err(Error::unsupported("compressed header above 64 KB"));
         }
@@ -354,7 +377,9 @@ mod tests {
             for y in 0..pl.height {
                 for x in 0..pl.width {
                     let v = if p == 0 {
-                        ((x * 3 + y * 2 + t * 4) % 256) as u16 / 2 + 40 + (((x / 7 + y / 5 + t) % 3) * 20) as u16
+                        ((x * 3 + y * 2 + t * 4) % 256) as u16 / 2
+                            + 40
+                            + (((x / 7 + y / 5 + t) % 3) * 20) as u16
                     } else {
                         (100 + (x + 2 * y + t) % 50) as u16
                     };

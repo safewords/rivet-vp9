@@ -16,7 +16,13 @@ fn committed_vectors() {
     let results = common::run_all(&paths);
     let failed: Vec<_> = results.iter().filter(|o| !o.passed()).collect();
     for o in &failed {
-        eprintln!("FAIL {}: {}/{} frames; {}", o.name, o.matched, o.expected, o.failure.as_deref().unwrap_or(""));
+        eprintln!(
+            "FAIL {}: {}/{} frames; {}",
+            o.name,
+            o.matched,
+            o.expected,
+            o.failure.as_deref().unwrap_or("")
+        );
     }
     assert!(failed.is_empty());
 }

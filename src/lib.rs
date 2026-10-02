@@ -55,6 +55,7 @@ pub(crate) mod header;
 pub mod ivf;
 pub(crate) mod probs;
 pub mod superframe;
+#[rustfmt::skip]
 pub(crate) mod tables;
 
 pub use decoder::Decoder;

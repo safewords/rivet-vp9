@@ -21,7 +21,11 @@ fn vint(data: &[u8], pos: usize, keep_marker: bool) -> Option<(u64, usize)> {
     if len > 8 || pos + len > data.len() {
         return None;
     }
-    let mut v = if keep_marker { first as u64 } else { (first as u64) & ((1u64 << (8 - len)) - 1) };
+    let mut v = if keep_marker {
+        first as u64
+    } else {
+        (first as u64) & ((1u64 << (8 - len)) - 1)
+    };
     for i in 1..len {
         v = (v << 8) | data[pos + i] as u64;
     }
@@ -31,8 +35,12 @@ fn vint(data: &[u8], pos: usize, keep_marker: bool) -> Option<(u64, usize)> {
 fn walk(data: &[u8], out: &mut Vec<Vec<u8>>, track: &mut Option<u64>) {
     let mut pos = 0;
     while pos < data.len() {
-        let Some((id, il)) = vint(data, pos, true) else { return };
-        let Some((size, sl)) = vint(data, pos + il, false) else { return };
+        let Some((id, il)) = vint(data, pos, true) else {
+            return;
+        };
+        let Some((size, sl)) = vint(data, pos + il, false) else {
+            return;
+        };
         let start = pos + il + sl;
         let unknown = size == (1u64 << (7 * sl)) - 1;
         if !unknown && start + size as usize > data.len() {
@@ -40,7 +48,11 @@ fn walk(data: &[u8], out: &mut Vec<Vec<u8>>, track: &mut Option<u64>) {
             // here (vp90-2-15-fuzz-flicker.webm ends with one). Stop.
             return;
         }
-        let end = if unknown { data.len() } else { start + size as usize };
+        let end = if unknown {
+            data.len()
+        } else {
+            start + size as usize
+        };
         match id {
             // Segment, Cluster, BlockGroup: descend.
             0x18538067 | 0x1F43B675 | 0xA0 => walk(&data[start..end], out, track),
@@ -67,7 +79,10 @@ pub fn packets(path: &Path) -> Vec<Vec<u8>> {
     let data = std::fs::read(path).unwrap();
     // By content, not extension: vp90-2-13-largescaling.ivf is WebM.
     if data.starts_with(b"DKIF") {
-        vp9::ivf::IvfReader::new(&data).unwrap().map(|f| f.unwrap().data.to_vec()).collect()
+        vp9::ivf::IvfReader::new(&data)
+            .unwrap()
+            .map(|f| f.unwrap().data.to_vec())
+            .collect()
     } else {
         webm_frames(&data)
     }
@@ -131,7 +146,10 @@ pub fn run_vector(path: &Path) -> Outcome {
                 if expected.get(frames) == Some(&sum) {
                     matched += 1;
                 } else {
-                    failure = Some(format!("frame {frames} ({}x{}) md5 mismatch", f.width, f.height));
+                    failure = Some(format!(
+                        "frame {frames} ({}x{}) md5 mismatch",
+                        f.width, f.height
+                    ));
                 }
             }
             frames += 1;
@@ -141,15 +159,27 @@ pub fn run_vector(path: &Path) -> Outcome {
         }
     }
     if failure.is_none() && frames != expected.len() {
-        failure = Some(format!("{} frames shown, {} expected", frames, expected.len()));
+        failure = Some(format!(
+            "{} frames shown, {} expected",
+            frames,
+            expected.len()
+        ));
     }
-    Outcome { name, frames, expected: expected.len(), matched, failure }
+    Outcome {
+        name,
+        frames,
+        expected: expected.len(),
+        matched,
+        failure,
+    }
 }
 
 /// The downloaded vectors (see tools/fetch-vectors.sh), sorted.
 pub fn downloaded_vectors() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
-    let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
     let mut v: Vec<PathBuf> = rd
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "webm" || e == "ivf"))

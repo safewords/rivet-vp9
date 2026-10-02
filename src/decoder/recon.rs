@@ -34,7 +34,11 @@ impl FrameDec<'_> {
         };
         let log2 = tx_sz as u32 + 2;
         let size = 1usize << log2;
-        let (sx, sy) = if plane > 0 { (self.ss_x, self.ss_y) } else { (0, 0) };
+        let (sx, sy) = if plane > 0 {
+            (self.ss_x, self.ss_y)
+        } else {
+            (0, 0)
+        };
         let max_x = ((self.mi_cols as usize * 8) >> sx) - 1;
         let max_y = ((self.mi_rows as usize * 8) >> sy) - 1;
         let base = 1i32 << (self.bit_depth - 1);
@@ -56,7 +60,11 @@ impl FrameDec<'_> {
                     above[1 + i] = above[size];
                 }
             }
-            above[0] = if have_left { row[max_x.min(x - 1)] as i32 } else { base + 1 };
+            above[0] = if have_left {
+                row[max_x.min(x - 1)] as i32
+            } else {
+                base + 1
+            };
         } else {
             for v in above.iter_mut().skip(1).take(2 * size) {
                 *v = base - 1;
@@ -73,11 +81,29 @@ impl FrameDec<'_> {
             }
         }
         let off = y * stride + x;
-        intra::predict(mode, log2, &above, &left, have_left, have_above, self.bit_depth, &mut buf.data[off..], stride);
+        intra::predict(
+            mode,
+            log2,
+            &above,
+            &left,
+            have_left,
+            have_above,
+            self.bit_depth,
+            &mut buf.data[off..],
+            stride,
+        );
     }
 
     /// The inter prediction process (8.5.2) for one plane region.
-    pub(crate) fn predict_inter(&mut self, plane: usize, x: usize, y: usize, w: usize, h: usize, block_idx: usize) -> Result<()> {
+    pub(crate) fn predict_inter(
+        &mut self,
+        plane: usize,
+        x: usize,
+        y: usize,
+        w: usize,
+        h: usize,
+        block_idx: usize,
+    ) -> Result<()> {
         let is_compound = self.b.ref_frame[1] > INTRA_FRAME;
         let mut preds = [[0u16; 64 * 64]; 2];
         for ref_list in 0..1 + is_compound as usize {
@@ -88,8 +114,14 @@ impl FrameDec<'_> {
             } else {
                 match (self.ss_x, self.ss_y) {
                     (0, 0) => bm[block_idx],
-                    (0, _) => [q2(bm[block_idx][0] + bm[block_idx + 2][0]), q2(bm[block_idx][1] + bm[block_idx + 2][1])],
-                    (_, 0) => [q2(bm[block_idx][0] + bm[block_idx + 1][0]), q2(bm[block_idx][1] + bm[block_idx + 1][1])],
+                    (0, _) => [
+                        q2(bm[block_idx][0] + bm[block_idx + 2][0]),
+                        q2(bm[block_idx][1] + bm[block_idx + 2][1]),
+                    ],
+                    (_, 0) => [
+                        q2(bm[block_idx][0] + bm[block_idx + 1][0]),
+                        q2(bm[block_idx][1] + bm[block_idx + 1][1]),
+                    ],
                     _ => [
                         q4(bm[0][0] + bm[1][0] + bm[2][0] + bm[3][0]),
                         q4(bm[0][1] + bm[1][1] + bm[2][1] + bm[3][1]),
@@ -97,7 +129,11 @@ impl FrameDec<'_> {
                 }
             };
             // Motion vector clamping (8.5.2.2).
-            let (sx, sy) = if plane > 0 { (self.ss_x as i32, self.ss_y as i32) } else { (0, 0) };
+            let (sx, sy) = if plane > 0 {
+                (self.ss_x as i32, self.ss_y as i32)
+            } else {
+                (0, 0)
+            };
             let bh = NUM_8X8_HIGH[self.b.mi_size as usize] as i32;
             let bw = NUM_8X8_WIDE[self.b.mi_size as usize] as i32;
             let (mi_row, mi_col) = (self.b.mi_row as i32, self.b.mi_col as i32);
@@ -115,14 +151,22 @@ impl FrameDec<'_> {
             ];
             // Motion vector scaling (8.5.2.3).
             let rf = self.b.ref_frame[ref_list];
-            let r = self.refs[(rf - LAST_FRAME) as usize].as_ref().ok_or_else(|| Error::bitstream("missing reference"))?;
+            let r = self.refs[(rf - LAST_FRAME) as usize]
+                .as_ref()
+                .ok_or_else(|| Error::bitstream("missing reference"))?;
             let sc = inter_scale(r.width, r.height, self.h.width, self.h.height)
                 .ok_or_else(|| Error::bitstream("reference frame scaled beyond 2:1 / 1:16"))?;
-            let (start_x, start_y, step_x, step_y) = sc.position(plane > 0, self.ss_x, self.ss_y, x as i64, y as i64, cmv);
+            let (start_x, start_y, step_x, step_y) =
+                sc.position(plane > 0, self.ss_x, self.ss_y, x as i64, y as i64, cmv);
             let rp = &r.planes[plane];
             let last_x = ((r.width + sx as u32) >> sx) as i32 - 1;
             let last_y = ((r.height + sy as u32) >> sy) as i32 - 1;
-            let refp = inter::RefPlane { data: &rp.data, stride: rp.stride, last_x, last_y };
+            let refp = inter::RefPlane {
+                data: &rp.data,
+                stride: rp.stride,
+                last_x,
+                last_y,
+            };
             inter::predict(
                 &refp,
                 start_x,
@@ -142,7 +186,8 @@ impl FrameDec<'_> {
             let row = &mut buf.data[(y + i) * stride + x..(y + i) * stride + x + w];
             if is_compound {
                 for j in 0..w {
-                    row[j] = ((preds[0][i * w + j] as u32 + preds[1][i * w + j] as u32 + 1) >> 1) as u16;
+                    row[j] =
+                        ((preds[0][i * w + j] as u32 + preds[1][i * w + j] as u32 + 1) >> 1) as u16;
                 }
             } else {
                 row.copy_from_slice(&preds[0][i * w..i * w + w]);
@@ -165,10 +210,22 @@ impl FrameDec<'_> {
     }
 
     /// The reconstruct process (8.6.2) for the coefficients in `self.coefs`.
-    pub(crate) fn reconstruct(&mut self, plane: usize, x: usize, y: usize, tx_sz: u8, tx_type: u8, _eob: usize) {
+    pub(crate) fn reconstruct(
+        &mut self,
+        plane: usize,
+        x: usize,
+        y: usize,
+        tx_sz: u8,
+        tx_type: u8,
+        _eob: usize,
+    ) {
         let bd_idx = ((self.bit_depth - 8) >> 1) as usize;
         let q = self.qindex();
-        let (dc_delta, ac_delta) = if plane == 0 { (self.h.delta_q_y_dc, 0) } else { (self.h.delta_q_uv_dc, self.h.delta_q_uv_ac) };
+        let (dc_delta, ac_delta) = if plane == 0 {
+            (self.h.delta_q_y_dc, 0)
+        } else {
+            (self.h.delta_q_uv_dc, self.h.delta_q_uv_ac)
+        };
         let dc_q = DC_QLOOKUP[bd_idx][(q + dc_delta).clamp(0, 255) as usize] as i64;
         let ac_q = AC_QLOOKUP[bd_idx][(q + ac_delta).clamp(0, 255) as usize] as i64;
         let dq_denom = if tx_sz == TX_32X32 { 2 } else { 1 };
@@ -188,7 +245,9 @@ impl FrameDec<'_> {
         for i in 0..n0 {
             let row = &mut buf.data[(y + i) * stride + x..(y + i) * stride + x + n0];
             for j in 0..n0 {
-                row[j] = (row[j] as i32).saturating_add(block[i * n0 + j]).clamp(0, max) as u16;
+                row[j] = (row[j] as i32)
+                    .saturating_add(block[i * n0 + j])
+                    .clamp(0, max) as u16;
             }
         }
         block.iter_mut().for_each(|v| *v = 0);

@@ -23,7 +23,13 @@ pub(crate) struct LoopFilter {
 
 impl Default for LoopFilter {
     fn default() -> Self {
-        LoopFilter { level: 0, sharpness: 0, delta_enabled: true, ref_deltas: [1, 0, -1, -1], mode_deltas: [0, 0] }
+        LoopFilter {
+            level: 0,
+            sharpness: 0,
+            delta_enabled: true,
+            ref_deltas: [1, 0, -1, -1],
+            mode_deltas: [0, 0],
+        }
     }
 }
 
@@ -212,7 +218,11 @@ fn read_delta_q(r: &mut BitReader) -> Result<i32> {
 }
 
 fn read_prob(r: &mut BitReader) -> Result<u8> {
-    if r.flag()? { Ok(r.f(8)? as u8) } else { Ok(255) }
+    if r.flag()? {
+        Ok(r.f(8)? as u8)
+    } else {
+        Ok(255)
+    }
 }
 
 /// What the caller must do after the uncompressed header asked for
@@ -226,7 +236,10 @@ pub(crate) enum ResetContexts {
 
 /// Parses uncompressed_header() and trailing_bits(). Updates `st` (loop
 /// filter deltas, segmentation) as the syntax prescribes.
-pub(crate) fn parse_uncompressed(data: &[u8], st: &mut Persistent) -> Result<(FrameHeader, ResetContexts)> {
+pub(crate) fn parse_uncompressed(
+    data: &[u8],
+    st: &mut Persistent,
+) -> Result<(FrameHeader, ResetContexts)> {
     let mut r = BitReader::new(data);
     let mut h = FrameHeader::default();
     if r.f(2)? != 2 {
@@ -269,7 +282,11 @@ pub(crate) fn parse_uncompressed(data: &[u8], st: &mut Persistent) -> Result<(Fr
     } else {
         h.intra_only = if !h.show_frame { r.flag()? } else { false };
         h.frame_is_intra = h.intra_only;
-        h.reset_frame_context = if !h.error_resilient_mode { r.f(2)? as u8 } else { 0 };
+        h.reset_frame_context = if !h.error_resilient_mode {
+            r.f(2)? as u8
+        } else {
+            0
+        };
         if h.intra_only {
             frame_sync_code(&mut r)?;
             if h.profile > 0 {
@@ -295,7 +312,9 @@ pub(crate) fn parse_uncompressed(data: &[u8], st: &mut Persistent) -> Result<(Fr
                 if r.flag()? {
                     let (w, ht) = st.ref_sizes[h.ref_frame_idx[i] as usize];
                     if w == 0 {
-                        return Err(Error::bitstream("frame size taken from an empty reference slot"));
+                        return Err(Error::bitstream(
+                            "frame size taken from an empty reference slot",
+                        ));
                     }
                     h.width = w;
                     h.height = ht;
@@ -311,7 +330,11 @@ pub(crate) fn parse_uncompressed(data: &[u8], st: &mut Persistent) -> Result<(Fr
             render_size(&mut r, &mut h)?;
             h.allow_high_precision_mv = r.flag()?;
             // read_interpolation_filter()
-            h.interpolation_filter = if r.flag()? { SWITCHABLE } else { LITERAL_TO_TYPE[r.f(2)? as usize] };
+            h.interpolation_filter = if r.flag()? {
+                SWITCHABLE
+            } else {
+                LITERAL_TO_TYPE[r.f(2)? as usize]
+            };
         }
     }
     st.bit_depth = h.bit_depth;
@@ -364,7 +387,8 @@ pub(crate) fn parse_uncompressed(data: &[u8], st: &mut Persistent) -> Result<(Fr
     h.delta_q_y_dc = read_delta_q(&mut r)?;
     h.delta_q_uv_dc = read_delta_q(&mut r)?;
     h.delta_q_uv_ac = read_delta_q(&mut r)?;
-    h.lossless = h.base_q_idx == 0 && h.delta_q_y_dc == 0 && h.delta_q_uv_dc == 0 && h.delta_q_uv_ac == 0;
+    h.lossless =
+        h.base_q_idx == 0 && h.delta_q_y_dc == 0 && h.delta_q_uv_dc == 0 && h.delta_q_uv_ac == 0;
     // segmentation_params()
     let seg = &mut st.seg;
     seg.enabled = r.flag()?;
@@ -378,7 +402,11 @@ pub(crate) fn parse_uncompressed(data: &[u8], st: &mut Persistent) -> Result<(Fr
             }
             seg.temporal_update = r.flag()?;
             for i in 0..3 {
-                seg.pred_probs[i] = if seg.temporal_update { read_prob(&mut r)? } else { 255 };
+                seg.pred_probs[i] = if seg.temporal_update {
+                    read_prob(&mut r)?
+                } else {
+                    255
+                };
             }
         }
         if r.flag()? {
@@ -464,7 +492,11 @@ fn inv_recenter_nonneg(v: i32, m: i32) -> i32 {
 pub(crate) fn inv_remap_prob(delta: u32, prob: u8) -> u8 {
     let v = INV_MAP_TABLE[(delta as usize).min(254)] as i32;
     let m = prob as i32 - 1;
-    let r = if (m << 1) <= 255 { 1 + inv_recenter_nonneg(v, m) } else { 255 - inv_recenter_nonneg(v, 255 - 1 - m) };
+    let r = if (m << 1) <= 255 {
+        1 + inv_recenter_nonneg(v, m)
+    } else {
+        255 - inv_recenter_nonneg(v, 255 - 1 - m)
+    };
     r.clamp(1, 255) as u8
 }
 
@@ -556,7 +588,11 @@ pub(crate) fn parse_compressed(data: &[u8], h: &mut FrameHeader, probs: &mut Pro
             if d.literal(1) == 0 {
                 h.reference_mode = SINGLE_REFERENCE;
             } else {
-                h.reference_mode = if d.literal(1) == 0 { COMPOUND_REFERENCE } else { REFERENCE_MODE_SELECT };
+                h.reference_mode = if d.literal(1) == 0 {
+                    COMPOUND_REFERENCE
+                } else {
+                    REFERENCE_MODE_SELECT
+                };
                 // setup_compound_reference_mode()
                 let lf = LAST_FRAME as usize;
                 let gf = GOLDEN_FRAME as usize;
