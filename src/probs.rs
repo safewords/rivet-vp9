@@ -1,6 +1,9 @@
 //! Frame contexts — the probability tables a frame decodes with — and the
 //! symbol counts and backward adaptation of section 8.4.
 
+// Loops index arrays the way the specification's formulas do.
+#![allow(clippy::needless_range_loop)]
+
 use crate::consts::*;
 use crate::tables::*;
 
@@ -10,7 +13,7 @@ use crate::tables::*;
 pub(crate) struct Probs {
     /// `[maxTxSize][ctx][node]`; row 0 unused.
     pub tx: [[[u8; 3]; 2]; 4],
-    pub coef: [[[[[[u8; 3]; 6]; 6]; 2]; 2]; 4],
+    pub coef: CoefProbs,
     pub skip: [u8; 3],
     pub inter_mode: [[u8; 3]; 7],
     pub interp_filter: [[u8; 2]; 4],
@@ -77,8 +80,11 @@ impl Probs {
     }
 }
 
+/// Counts per coefficient context, `[txSz][plane > 0][is_inter][band][ctx][value]`.
+pub(crate) type CoefCounts<const N: usize> = [[[[[[u32; N]; 6]; 6]; 2]; 2]; 4];
+
 /// The symbol counts of section 8.3.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct Counts {
     pub intra_mode: [[u32; 10]; 4],
     pub uv_mode: [[u32; 10]; 10],
@@ -101,37 +107,8 @@ pub(crate) struct Counts {
     pub mv_bits: [[[u32; 2]; 10]; 2],
     pub mv_fr: [[u32; 4]; 2],
     pub mv_hp: [[u32; 2]; 2],
-    pub token: [[[[[[u32; 3]; 6]; 6]; 2]; 2]; 4],
-    pub more_coefs: [[[[[[u32; 2]; 6]; 6]; 2]; 2]; 4],
-}
-
-impl Default for Counts {
-    fn default() -> Self {
-        Counts {
-            intra_mode: [[0; 10]; 4],
-            uv_mode: [[0; 10]; 10],
-            partition: [[0; 4]; 16],
-            interp_filter: [[0; 3]; 4],
-            inter_mode: [[0; 4]; 7],
-            tx: [[[0; 4]; 2]; 4],
-            is_inter: [[0; 2]; 4],
-            comp_mode: [[0; 2]; 5],
-            single_ref: [[[0; 2]; 2]; 5],
-            comp_ref: [[0; 2]; 5],
-            skip: [[0; 2]; 3],
-            mv_joint: [0; 4],
-            mv_sign: [[0; 2]; 2],
-            mv_class: [[0; 11]; 2],
-            mv_class0_bit: [[0; 2]; 2],
-            mv_class0_fr: [[[0; 4]; 2]; 2],
-            mv_class0_hp: [[0; 2]; 2],
-            mv_bits: [[[0; 2]; 10]; 2],
-            mv_fr: [[0; 4]; 2],
-            mv_hp: [[0; 2]; 2],
-            token: [[[[[[0; 3]; 6]; 6]; 2]; 2]; 4],
-            more_coefs: [[[[[[0; 2]; 6]; 6]; 2]; 2]; 4],
-        }
-    }
+    pub token: CoefCounts<3>,
+    pub more_coefs: CoefCounts<2>,
 }
 
 const COUNT_SAT: u32 = 20;

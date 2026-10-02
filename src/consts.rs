@@ -89,8 +89,6 @@ pub(crate) const MV_JOINT_HNZVNZ: u8 = 3;
 
 // Tokens (7.4.16).
 pub(crate) const ZERO_TOKEN: u8 = 0;
-pub(crate) const ONE_TOKEN: u8 = 1;
-pub(crate) const TWO_TOKEN: u8 = 2;
 pub(crate) const DCT_VAL_CAT6: u8 = 10;
 
 // Segmentation features.
@@ -265,12 +263,12 @@ pub(crate) const TX_SIZE_16_TREE: [i8; 4] = [-(TX_4X4 as i8), 2, -(TX_8X8 as i8)
 pub(crate) const TX_SIZE_8_TREE: [i8; 2] = [-(TX_4X4 as i8), -(TX_8X8 as i8)];
 /// inter_mode_tree; values are `inter_mode` = y_mode - NEARESTMV.
 pub(crate) const INTER_MODE_TREE: [i8; 6] = [
-    -((ZEROMV - NEARESTMV) as i8),
+    -2, // ZEROMV - NEARESTMV
     2,
-    -((NEARESTMV - NEARESTMV) as i8),
+    0, // NEARESTMV - NEARESTMV
     4,
-    -((NEARMV - NEARESTMV) as i8),
-    -((NEWMV - NEARESTMV) as i8),
+    -1, // NEARMV - NEARESTMV
+    -3, // NEWMV - NEARESTMV
 ];
 pub(crate) const INTERP_FILTER_TREE: [i8; 4] = [-(EIGHTTAP as i8), 2, -(EIGHTTAP_SMOOTH as i8), -(EIGHTTAP_SHARP as i8)];
 pub(crate) const MV_JOINT_TREE: [i8; 6] = [-(MV_JOINT_ZERO as i8), 2, -(MV_JOINT_HNZVZ as i8), 4, -(MV_JOINT_HZVNZ as i8), -(MV_JOINT_HNZVNZ as i8)];
@@ -280,3 +278,39 @@ pub(crate) const TOKEN_TREE: [i8; 20] = [0, 2, -1, 4, 6, 10, -2, 8, -3, -4, 12, 
 /// small_token_tree (8.4.3), adapted from index 2.
 pub(crate) const SMALL_TOKEN_TREE: [i8; 6] = [0, 0, 0, 4, -1, -2];
 pub(crate) const BINARY_TREE: [i8; 2] = [0, -1];
+
+#[cfg(test)]
+mod table_tests {
+    use crate::tables::*;
+
+    fn is_perm(s: &[u16]) -> bool {
+        let mut seen = vec![false; s.len()];
+        for &v in s {
+            if v as usize >= s.len() || seen[v as usize] {
+                return false;
+            }
+            seen[v as usize] = true;
+        }
+        true
+    }
+
+    #[test]
+    fn scans_are_permutations() {
+        for s in [&DEFAULT_SCAN_4X4[..], &COL_SCAN_4X4, &ROW_SCAN_4X4] {
+            assert!(is_perm(s));
+        }
+        for s in [&DEFAULT_SCAN_8X8[..], &COL_SCAN_8X8, &ROW_SCAN_8X8] {
+            assert!(is_perm(s));
+        }
+        for s in [&DEFAULT_SCAN_16X16[..], &COL_SCAN_16X16, &ROW_SCAN_16X16] {
+            assert!(is_perm(s));
+        }
+        assert!(is_perm(&DEFAULT_SCAN_32X32));
+    }
+
+    #[test]
+    fn bands_are_monotone() {
+        assert!(COEFBAND_8X8PLUS.windows(2).all(|w| w[0] <= w[1]));
+        assert!(COEFBAND_4X4.windows(2).all(|w| w[0] <= w[1]));
+    }
+}

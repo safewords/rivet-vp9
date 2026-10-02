@@ -2,6 +2,9 @@
 //! filter size and adaptive strength. The per-sample filters are in
 //! `dsp::lf`.
 
+// Loops index arrays the way the specification's formulas do.
+#![allow(clippy::needless_range_loop)]
+
 use super::{MiInfo, PlaneBuf};
 use crate::consts::*;
 use crate::dsp::lf;

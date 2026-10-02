@@ -5,6 +5,9 @@
 //! within 8 + BitDepth bits and the ADST's `S` within 24 + BitDepth, but the
 //! products before rounding need more than 32 bits at 12-bit depth.
 
+// Loops index arrays the way the specification's formulas do.
+#![allow(clippy::needless_range_loop)]
+
 use crate::consts::{ADST_ADST, ADST_DCT, DCT_ADST, DCT_DCT};
 use crate::tables::COS64_LOOKUP;
 

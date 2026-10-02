@@ -78,11 +78,6 @@ impl BitWriter {
         }
     }
 
-    pub(crate) fn s(&mut self, n: u32, v: i32) {
-        self.f(n, v.unsigned_abs());
-        self.bit(v < 0);
-    }
-
     /// Byte position after padding to a byte boundary with zero bits.
     pub(crate) fn finish(self) -> Vec<u8> {
         self.buf
@@ -98,9 +93,11 @@ mod tests {
         let mut w = BitWriter::default();
         w.f(2, 2);
         w.f(1, 1);
-        w.s(6, -17);
+        w.f(6, 17);
+        w.f(1, 1);
         w.f(16, 0xbeef);
-        w.s(4, 5);
+        w.f(4, 5);
+        w.f(1, 0);
         let bytes = w.finish();
         let mut r = BitReader::new(&bytes);
         assert_eq!(r.f(2).unwrap(), 2);

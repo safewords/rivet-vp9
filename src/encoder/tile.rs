@@ -5,6 +5,9 @@
 //! the residual syntax calls them, on its picture buffers, so the encoder's
 //! picture is the decoder's picture.
 
+// Loops index arrays the way the specification's formulas do.
+#![allow(clippy::needless_range_loop)]
+
 use crate::bool_coder::BoolEncoder;
 use crate::consts::*;
 use crate::decoder::block::{Block, Mv, pareto};

@@ -2,6 +2,9 @@
 //! prediction edges (8.5.1), inter prediction (8.5.2), dequantisation and
 //! the inverse transform (8.6.2).
 
+// Loops index arrays the way the specification's formulas do.
+#![allow(clippy::needless_range_loop)]
+
 use super::block::FrameDec;
 use super::inter_scale;
 use crate::consts::*;

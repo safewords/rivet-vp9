@@ -1,5 +1,8 @@
 //! The uncompressed header (6.2) and the compressed header (6.3).
 
+// Loops index arrays the way the specification's formulas do.
+#![allow(clippy::needless_range_loop)]
+
 use crate::bits::BitReader;
 use crate::bool_coder::BoolDecoder;
 use crate::consts::*;

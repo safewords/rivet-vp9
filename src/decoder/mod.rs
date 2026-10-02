@@ -1,6 +1,9 @@
 //! The decoder: frame-level process (section 8.1), reference slots, frame
 //! contexts, output.
 
+// Loops index arrays the way the specification's formulas do.
+#![allow(clippy::needless_range_loop)]
+
 pub(crate) mod block;
 mod loopfilter;
 mod mvpred;
@@ -25,12 +28,11 @@ pub const DEFAULT_MAX_PIXELS: u64 = 8192 * 8192;
 pub(crate) struct PlaneBuf {
     pub data: Vec<u16>,
     pub stride: usize,
-    pub rows: usize,
 }
 
 impl PlaneBuf {
     pub(crate) fn new(w: usize, h: usize) -> Self {
-        PlaneBuf { data: vec![0; w * h], stride: w, rows: h }
+        PlaneBuf { data: vec![0; w * h], stride: w }
     }
 }
 

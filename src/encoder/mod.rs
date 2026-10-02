@@ -120,7 +120,7 @@ impl Encoder {
             return Err(Error::unsupported("the encoder writes profile 0 only: 8-bit 4:2:0"));
         }
         let interval = self.cfg.keyframe_interval.max(1) as u64;
-        let key = self.force_key || self.frames % interval == 0;
+        let key = self.force_key || self.frames.is_multiple_of(interval);
         let h = self.header(key);
         let last: Option<Arc<RefFrame>> = if key { None } else { self.dec.ref_slot(0) };
         let key = key || last.is_none();

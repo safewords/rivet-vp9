@@ -2,6 +2,9 @@
 //! over a reference plane, with the reference's edge samples repeated
 //! outward (the clamps of the specification).
 
+// Loops index arrays the way the specification's formulas do.
+#![allow(clippy::needless_range_loop)]
+
 use crate::tables::SUBPEL_FILTERS;
 
 /// A reference plane as the predictor sees it.

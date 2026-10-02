@@ -1,5 +1,8 @@
 //! The intra predictors of section 8.5.1, given the edge arrays.
 
+// Loops index arrays the way the specification's formulas do.
+#![allow(clippy::needless_range_loop)]
+
 use crate::consts::*;
 
 #[inline]

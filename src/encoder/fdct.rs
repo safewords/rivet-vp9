@@ -9,6 +9,9 @@
 //! decoder's unit tests check its transforms against these). The lossless
 //! Walsh-Hadamard transform is integer and exactly inverts the decoder's.
 
+// Loops index arrays the way the specification's formulas do.
+#![allow(clippy::needless_range_loop)]
+
 use std::f64::consts::PI;
 use std::sync::OnceLock;
 

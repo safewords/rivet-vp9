@@ -1127,7 +1127,7 @@ impl<'a> FrameDec<'a> {
                 } else {
                     (j - 1, j - 1)
                 };
-                ctx = ((1 + self.token_cache[a] as usize + self.token_cache[b] as usize) >> 1) as usize;
+                ctx = (1 + self.token_cache[a] as usize + self.token_cache[b] as usize) >> 1;
             }
             let probs = &self.probs.coef[txs][ptype][ref_type][band][ctx];
             if check_eob {
