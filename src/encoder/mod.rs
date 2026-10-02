@@ -142,26 +142,15 @@ impl Encoder {
         let last: Option<Arc<RefFrame>> = if key { None } else { self.dec.ref_slot(0) };
         let key = key || last.is_none();
         let h = if key { self.header(true) } else { h };
-        let comp = compressed_header(&h);
-        let mut recon = None;
-        let tiles = {
-            let seg = Segmentation::default();
-            let mut probs = Probs::default();
-            let mut counts = Box::<Counts>::default();
-            let refs: [Option<Arc<RefFrame>>; 3] = if key {
-                Default::default()
-            } else {
-                [last.clone(), last.clone(), last.clone()]
-            };
-            let mut fd = FrameDec::new(&h, &seg, &mut probs, &mut counts, &[], None, refs);
-            let src = tile::Source::new(frame, &h);
-            let mut te = tile::TileEncoder::new(&self.cfg, &h, &src, last.as_deref());
-            let t = te.encode_tiles(&mut fd);
-            if cfg!(debug_assertions) && self.loop_filter_level() == 0 {
-                recon = Some(fd.finish().0);
-            }
-            t
-        };
+        let src = tile::Source::new(frame, &h);
+        // A first pass with the default probabilities measures the
+        // coefficient statistics; the coefficient probabilities that pay
+        // for their own update are sent, and the frame coded again with them.
+        let defaults = Probs::default();
+        let (_, stats, _) = self.encode_pass(&h, &src, last.clone(), &defaults, false);
+        let probs = updated_coef_probs(&defaults, &stats, h.tx_mode);
+        let (tiles, _, recon) = self.encode_pass(&h, &src, last, &probs, true);
+        let comp = compressed_header(&h, &defaults, &probs);
         let mut w = BitWriter::default();
         self.uncompressed_header(&mut w, &h, comp.len())?;
         let mut packet = w.finish();
@@ -193,6 +182,40 @@ impl Encoder {
         self.frames += 1;
         self.force_key = false;
         Ok(packet)
+    }
+
+    /// Codes the tiles of a frame with `probs`; returns the tile data, the
+    /// coefficient statistics and (debug builds, no loop filter, `keep`) the
+    /// reconstruction.
+    fn encode_pass(
+        &self,
+        h: &FrameHeader,
+        src: &tile::Source,
+        last: Option<Arc<RefFrame>>,
+        probs: &Probs,
+        keep: bool,
+    ) -> (
+        Vec<u8>,
+        Box<tile::CoefStats>,
+        Option<[crate::decoder::PlaneBuf; 3]>,
+    ) {
+        let seg = Segmentation::default();
+        let mut probs = probs.clone();
+        let mut counts = Box::<Counts>::default();
+        let refs: [Option<Arc<RefFrame>>; 3] = if h.frame_is_intra {
+            Default::default()
+        } else {
+            [last.clone(), last.clone(), last.clone()]
+        };
+        let mut fd = FrameDec::new(h, &seg, &mut probs, &mut counts, &[], None, refs);
+        let mut te = tile::TileEncoder::new(&self.cfg, h, src, last.as_deref());
+        let t = te.encode_tiles(&mut fd);
+        let recon = if keep && cfg!(debug_assertions) && self.loop_filter_level() == 0 {
+            Some(fd.finish().0)
+        } else {
+            None
+        };
+        (t, te.stats, recon)
     }
 
     fn loop_filter_level(&self) -> u8 {
@@ -323,18 +346,151 @@ impl Encoder {
     }
 }
 
-/// compressed_header(): the transform mode and no probability updates.
-fn compressed_header(h: &FrameHeader) -> Vec<u8> {
+/// Bits of a bool of probability `p` (of a 0): its cost when 0 and when 1.
+fn bool_cost(p: u8) -> (f64, f64) {
+    let p0 = p as f64 / 256.0;
+    (-p0.log2(), -(1.0 - p0).log2())
+}
+
+/// The deltaProb whose inv_remap_prob takes `old` to `new` with the
+/// fewest bits, and those bits (the code of decode_term_subexp).
+fn best_delta(old: u8, new: u8) -> Option<(u32, f64)> {
+    (0..254u32)
+        .filter(|&d| crate::header::inv_remap_prob(d, old) == new)
+        .map(|d| (d, subexp_bits(d)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+fn subexp_bits(d: u32) -> f64 {
+    match d {
+        0..=15 => 5.0,
+        16..=31 => 6.0,
+        32..=63 => 8.0,
+        64..=128 => 10.0,
+        _ => 11.0,
+    }
+}
+
+/// The inverse of decode_term_subexp (6.3.4).
+fn write_subexp(e: &mut BoolEncoder, d: u32) {
+    if d < 16 {
+        e.literal(1, 0);
+        e.literal(4, d);
+    } else if d < 32 {
+        e.literal(2, 0b10);
+        e.literal(4, d - 16);
+    } else if d < 64 {
+        e.literal(3, 0b110);
+        e.literal(5, d - 32);
+    } else {
+        e.literal(3, 0b111);
+        if d - 64 < 65 {
+            e.literal(7, d - 64);
+        } else {
+            // v of 65 or more, then one more bit: d = (v << 1) - 1 + bit.
+            let bit = (d + 1) & 1;
+            e.literal(7, (d + 1 - bit) >> 1);
+            e.literal(1, bit);
+        }
+    }
+}
+
+/// The inverse of diff_update_prob (6.3.3).
+fn write_diff_update(e: &mut BoolEncoder, old: u8, new: u8) {
+    match best_delta(old, new) {
+        Some((d, _)) if old != new => {
+            e.write(true, 252);
+            write_subexp(e, d);
+        }
+        _ => e.write(false, 252),
+    }
+}
+
+/// The coefficient probabilities worth updating, given how often each of
+/// the first three nodes of every context saw a 0 and a 1. A transform
+/// size's probabilities are updated together or not at all, as its
+/// update_probs flag decides.
+fn updated_coef_probs(old: &Probs, stats: &tile::CoefStats, tx_mode: u8) -> Probs {
+    let mut p = old.clone();
+    let (no0, _) = bool_cost(252);
+    let (_, yes1) = bool_cost(252);
+    let max_tx = TX_MODE_TO_BIGGEST_TX_SIZE[tx_mode as usize] as usize;
+    for tx in 0..=max_tx {
+        let mut saving = -1.0; // the update_probs flag
+        let mut cand = p.coef[tx];
+        for i in 0..2 {
+            for j in 0..2 {
+                for k in 0..6 {
+                    for l in 0..if k == 0 { 3 } else { 6 } {
+                        for m in 0..3 {
+                            let [c0, c1] = stats[tx][i][j][k][l][m];
+                            let o = old.coef[tx][i][j][k][l][m];
+                            let cost = |q: u8| {
+                                let (z, n) = bool_cost(q);
+                                c0 as f64 * z + c1 as f64 * n
+                            };
+                            let mut best = (o, cost(o) + no0);
+                            if c0 + c1 > 0 {
+                                let n = (c0 + c1) as u64;
+                                let target = ((c0 as u64 * 256 + n / 2) / n).clamp(1, 255) as u8;
+                                for q in [
+                                    target,
+                                    target.saturating_sub(2).max(1),
+                                    target.saturating_add(2),
+                                ] {
+                                    if q != o
+                                        && let Some((_, bits)) = best_delta(o, q)
+                                    {
+                                        let c = cost(q) + yes1 + bits;
+                                        if c < best.1 {
+                                            best = (q, c);
+                                        }
+                                    }
+                                }
+                            }
+                            cand[i][j][k][l][m] = best.0;
+                            saving += cost(o) + no0 - best.1;
+                        }
+                    }
+                }
+            }
+        }
+        if saving > 0.0 {
+            p.coef[tx] = cand;
+        }
+    }
+    p
+}
+
+/// compressed_header(): the transform mode, the coefficient probability
+/// updates from `old` to `new`, and no other updates.
+fn compressed_header(h: &FrameHeader, old: &Probs, new: &Probs) -> Vec<u8> {
     let mut e = BoolEncoder::new();
     let no = |e: &mut BoolEncoder| e.write(false, 252);
     if !h.lossless {
         e.literal(2, ALLOW_32X32 as u32);
         e.literal(1, 0); // tx_mode_select
     }
-    // read_coef_probs(): no update for any transform size.
-    let max_tx = TX_MODE_TO_BIGGEST_TX_SIZE[h.tx_mode as usize];
-    for _ in 0..=max_tx {
-        e.literal(1, 0);
+    // read_coef_probs()
+    let max_tx = TX_MODE_TO_BIGGEST_TX_SIZE[h.tx_mode as usize] as usize;
+    for tx in 0..=max_tx {
+        let update = old.coef[tx] != new.coef[tx];
+        e.literal(1, update as u32);
+        if update {
+            for i in 0..2 {
+                for j in 0..2 {
+                    for k in 0..6 {
+                        for l in 0..if k == 0 { 3 } else { 6 } {
+                            for m in 0..3 {
+                                let (a, b) =
+                                    (old.coef[tx][i][j][k][l][m], new.coef[tx][i][j][k][l][m]);
+                                write_diff_update(&mut e, a, b);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     for _ in 0..3 {
         no(&mut e); // skip probs

@@ -77,7 +77,13 @@ pub(crate) struct TileEncoder<'a> {
     pad_stride: usize,
     /// Rate-distortion multiplier (squared error per bit).
     lambda: f64,
+    /// How often each of the first three coefficient probabilities of
+    /// every context saw a 0 and a 1: what forward updates are judged by.
+    pub(crate) stats: Box<CoefStats>,
 }
+
+/// `[txSz][plane > 0][is_inter][band][ctx][node][bit]`.
+pub(crate) type CoefStats = [[[[[[[u32; 2]; 3]; 6]; 6]; 2]; 2]; 4];
 
 const PAD: usize = 96;
 
@@ -135,6 +141,7 @@ impl<'a> TileEncoder<'a> {
             padded: Vec::new(),
             pad_stride: 0,
             lambda,
+            stats: Box::new([[[[[[[0; 2]; 3]; 6]; 6]; 2]; 2]; 4]),
         };
         if let Some(r) = last {
             let w = r.width as usize;
@@ -913,7 +920,7 @@ impl<'a> TileEncoder<'a> {
                 if let Some(tb) = tb
                     && !skip
                 {
-                    write_tokens(e, fd, plane, start_x, start_y, tx_sz, tb);
+                    write_tokens(e, fd, &mut self.stats, plane, start_x, start_y, tx_sz, tb);
                     nonzero = tb.eob > 0;
                 }
                 for i in 0..step {
@@ -975,9 +982,11 @@ fn scan_for(tx_sz: u8, tx_type: u8) -> &'static [u16] {
 }
 
 /// The inverse of tokens() (6.4.24): the same contexts, writing.
+#[allow(clippy::too_many_arguments)]
 fn write_tokens(
     e: &mut BoolEncoder,
     fd: &mut FrameDec,
+    stats: &mut CoefStats,
     plane: usize,
     start_x: usize,
     start_y: usize,
@@ -1035,8 +1044,10 @@ fn write_tokens(
             ctx = (1 + fd.token_cache[a] as usize + fd.token_cache[b] as usize) >> 1;
         }
         let probs = fd.probs.coef[txs][ptype][ref_type][band][ctx];
+        let st = &mut stats[txs][ptype][ref_type][band][ctx];
         if check_eob {
             let more = c < tb.eob;
+            st[0][more as usize] += 1;
             e.write(more, probs[0]);
             if !more {
                 break;
@@ -1053,6 +1064,10 @@ fn write_tokens(
             35..=66 => 9,
             _ => 10,
         };
+        st[1][(token != ZERO_TOKEN) as usize] += 1;
+        if token != ZERO_TOKEN {
+            st[2][(token > 1) as usize] += 1;
+        }
         e.tree(&TOKEN_TREE, token, |node| {
             pareto(node, probs[(1 + node).min(2)])
         });
