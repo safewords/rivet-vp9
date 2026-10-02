@@ -37,7 +37,7 @@ impl FrameDec<'_> {
     fn get_block_mv(&self, s: &mut Search, r: i32, c: i32, ref_list: usize, use_prev: bool) {
         let idx = (r as u32 * self.mi_cols + c as u32) as usize;
         if use_prev {
-            let p = self.prev_mvs.unwrap()[idx];
+            let p = self.prev_mvs.and_then(|v| v.get(idx)).copied().unwrap_or_default();
             s.cand_mv[ref_list] = p.mv[ref_list];
             s.cand_frame[ref_list] = p.ref_frame[ref_list];
         } else {

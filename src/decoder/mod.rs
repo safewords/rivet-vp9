@@ -17,6 +17,9 @@ use crate::{Error, Result};
 
 pub(crate) use block::MiInfo;
 
+/// The default limit of [`Decoder::set_max_pixels`]: 8192 x 8192.
+pub const DEFAULT_MAX_PIXELS: u64 = 8192 * 8192;
+
 /// One plane of samples, allocated to whole superblocks.
 #[derive(Clone)]
 pub(crate) struct PlaneBuf {
@@ -101,6 +104,7 @@ pub struct Decoder {
     last_size: Option<(u32, u32)>,
     last_show_frame: bool,
     frames: u64,
+    max_pixels: u64,
 }
 
 impl Default for Decoder {
@@ -122,7 +126,15 @@ impl Decoder {
             last_size: None,
             last_show_frame: false,
             frames: 0,
+            max_pixels: DEFAULT_MAX_PIXELS,
         }
+    }
+
+    /// Refuses frames of more than `pixels` luma samples (width x height)
+    /// with [`Error::Unsupported`] instead of allocating for them. The
+    /// default is [`DEFAULT_MAX_PIXELS`]; VP9 allows up to 65536 x 65536.
+    pub fn set_max_pixels(&mut self, pixels: u64) {
+        self.max_pixels = pixels;
     }
 
     /// Decodes one packet (a frame, or a superframe of several). Returns the
@@ -161,6 +173,9 @@ impl Decoder {
                 .ok_or_else(|| Error::bitstream("show_existing_frame of an empty slot"))?;
             self.frames += 1;
             return Ok(Some(r.to_frame()));
+        }
+        if h.width as u64 * h.height as u64 > self.max_pixels {
+            return Err(Error::unsupported(format!("{}x{} is above the decoder's frame size limit", h.width, h.height)));
         }
         if h.header_size_in_bytes == 0 {
             return Err(Error::bitstream("compressed header of size 0"));

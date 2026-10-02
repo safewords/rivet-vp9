@@ -185,7 +185,7 @@ impl FrameDec<'_> {
         for i in 0..n0 {
             let row = &mut buf.data[(y + i) * stride + x..(y + i) * stride + x + n0];
             for j in 0..n0 {
-                row[j] = (row[j] as i32 + block[i * n0 + j]).clamp(0, max) as u16;
+                row[j] = (row[j] as i32).saturating_add(block[i * n0 + j]).clamp(0, max) as u16;
             }
         }
         block.iter_mut().for_each(|v| *v = 0);
