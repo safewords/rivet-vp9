@@ -1,0 +1,45 @@
+rivet-vp9 — a VP9 decoder and encoder
+Copyright 2026 Ely Erin Fox
+
+This product is licensed under the Open Encoding Attribution License,
+Version 1.0 (see LICENSE.md). It is source-available, not open source: the
+attribution duty in §5 applies to commercial use; §4 requires this NOTICE to
+be carried forward with any distribution.
+
+------------------------------------------------------------------------------
+Provenance
+------------------------------------------------------------------------------
+
+The decoder and encoder are original implementations written from the VP9
+Bitstream & Decoding Process Specification, v0.6 (31 March 2016) and v0.7
+(22 February 2017), Google and Argon Design, as published by the WebM
+project. They are not translations of, and do not derive from, any other
+VP9 encoder's or decoder's source: no implementation's code (libvpx,
+FFmpeg's libavcodec or any other) was read, and none was run in testing.
+The specification's tables (default and fixed probabilities, scans, the
+Pareto table, quantiser lookups, subpixel filter taps, block-size lookups)
+are reproduced from it as data; tools/gen_tables.py extracts them from the
+PDF and regenerates src/tables.rs identically from either version.
+
+Correctness is checked against the WebM project's public VP9 test vectors —
+bitstreams and the MD5s of their decoded frames, published as data for
+decoder testing at
+https://storage.googleapis.com/downloads.webmproject.org/test_data/libvpx/ —
+fourteen of which are included in tests/data (listed in its README).
+
+------------------------------------------------------------------------------
+Patents
+------------------------------------------------------------------------------
+
+Google offers a royalty-free patent licence for VP9 through the WebM
+project; third parties have asserted patents on VP9 as well. This licence
+grants no rights under any patent, and the authors make no claim about
+whether a licence is needed for any use.
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+thiserror (https://crates.io/crates/thiserror) — MIT OR Apache-2.0
+md5 (https://crates.io/crates/md5), development dependency only — MIT OR Apache-2.0
+proptest (https://crates.io/crates/proptest), development dependency only — MIT OR Apache-2.0
