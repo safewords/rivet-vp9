@@ -39,7 +39,8 @@
 //!   residual tokens, reconstruction, loop filter, reference slots.
 //! - `dsp` — inverse transforms, intra and inter predictors, loop filter
 //!   kernels.
-//! - [`encoder`] — a key-frame and inter-frame encoder.
+//! - [`encoder`] — the encoder: profiles 0 to 3, rate-distortion partition
+//!   and transform-size search, LAST and GOLDEN references, rate control.
 //! - [`ivf`] — the IVF container; [`superframe`] — Annex B superframes.
 
 #![warn(missing_docs)]

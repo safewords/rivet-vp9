@@ -7,17 +7,20 @@ script, nothing to install on a build host. Written from the *VP9 Bitstream
 & Decoding Process Specification* (v0.6 / v0.7, Google and Argon Design),
 not translated from any other implementation. The decoder is bit-exact on
 **352 of the 353** public VP9 test vectors it was run on (the numbers are
-[below](#how-it-is-checked)); the encoder writes profile 0 key and inter
-frames that decode to what it reconstructed, sample for sample.
+[below](#how-it-is-checked)); the encoder writes all four profiles (8 to
+12 bits, 4:2:0 to 4:4:4) with a rate-distortion partition and transform
+search and a target bitrate (one or two passes), and its frames decode to
+what it reconstructed, sample for sample.
 
 Written for the **[rivet](https://github.com/rivet-transcoder/rivet)**
 transcoder, as its VP9 codec on both sides. Usable on its own by anything
 that has VP9 frames (from IVF, WebM / Matroska, MP4) and wants planar
 pictures back, or planar pictures and wants VP9.
 
-This is the first milestone of a longer effort: the decoder is complete
-but single-threaded and scalar; the encoder is deliberately simple. What is
-and is not there is listed precisely below.
+This is an early milestone of a longer effort: the decoder is complete but
+single-threaded and scalar; the encoder is complete enough to use but slow
+and missing several tools. What is and is not there is listed precisely
+below.
 
 Published as `rivet-vp9`; **imported as `vp9`** (`use vp9::…`). One
 dependency (`thiserror`), no features, no build script.
@@ -66,29 +69,58 @@ Not there yet:
 
 ## What it encodes
 
-Profile 0 (8-bit 4:2:0), one packet per frame, any size from 1x1 up:
+Profiles 0 to 3 — 8, 10 and 12 bits; 4:2:0, 4:2:2, 4:4:0 and 4:4:4 (and
+sRGB, coded 4:4:4) — one packet per frame, any size from 1x1 up. The
+profile follows from `Config::bit_depth` and `Config::chroma`
+(`Config::profile()`).
 
-- **Key frames**: every block coded with the best of the ten intra modes
-  (luma and chroma chosen separately by rate-distortion cost on the actual
-  reconstruction).
-- **Inter frames**: single-reference prediction from the previous frame —
-  whole-pixel diamond search then half- and quarter-sample refinement with
-  the decoder's 8-tap filter; NEARESTMV, NEARMV, ZEROMV or NEWMV (motion
-  vectors coded against the specification's motion vector prediction);
-  intra as the alternative per block.
-- **Fixed quantiser** (`Config::quantizer`, the `base_q_idx` 0–255) with a
-  dead-zone rounding quantiser; **quantiser 0 is lossless** (the 4x4
-  Walsh-Hadamard transform, exact).
-- **Fixed partition**: square blocks of `Config::block_size` (8, 16, 32 or
-  64), split or halved where the frame edge forces it, each with the
-  largest transform that fits; DCT and ADST as the intra mode implies.
+- **Key frames**: every block coded with the best of the ten intra modes.
+- **Inter frames**: single-reference prediction from **LAST** (the previous
+  frame) or **GOLDEN** (the last key frame, replaced every
+  `Config::golden_interval` frames, default 8, by a frame coded finer: at
+  3/4 of the quantiser, or with twice an inter frame's budget under rate
+  control) — whole-pixel diamond search then half- and quarter-sample
+  refinement with the decoder's 8-tap filter, per reference; NEARESTMV,
+  NEARMV, ZEROMV or NEWMV (motion vectors coded against the specification's
+  motion vector prediction); intra as the alternative per block.
+- **Rate-distortion search** (`Config::speed`): every candidate — a
+  partition of a region, a transform size, intra against inter — is coded
+  for real (prediction, transform, quantisation, reconstruction) and its
+  syntax written to a bit counter, which gives its exact rate under the
+  frame's probabilities; the cheapest by squared error + λ·rate wins (λ
+  from the quantiser step, so scaled by 2^(2(bitdepth − 8)) at high bit
+  depth). A superblock's state is saved and restored around each trial and
+  the winning decisions replayed into the boolean encoder.
+  - speed 0: the partition from 64x64 down to 8x8 with NONE, HORZ, VERT and
+    SPLIT; every transform size (`TX_MODE_SELECT`).
+  - speed 1 (default): NONE and SPLIT (HORZ / VERT where the frame edge
+    forces them); the two largest transform sizes.
+  - speed 2: the fixed partition of `Config::block_size` (8, 16, 32 or 64),
+    the largest transform that fits — the encoder before this release.
+
+  In 4:2:2 and 4:4:0, partitions whose chroma block the specification
+  forbids are never chosen (a forced edge HORZ / VERT becomes a SPLIT).
+- **Rate control**: a fixed quantiser (`Config::quantizer`, the
+  `base_q_idx` 0–255; **0 is lossless**, the 4x4 Walsh-Hadamard transform),
+  or a **target bitrate** (`Config::target_bitrate` at
+  `Config::frame_rate`). Each frame gets a budget and is coded at the
+  quantiser a per-frame-type model (`bits = c · qstep^-s`) predicts, then
+  recoded — up to `Config::max_recodes` times, default 2 — while it misses
+  by more than 12%; the attempt nearest the budget is sent. One pass: the
+  bitrate's share per frame (key frames 4x, golden frames 2x, budget-neutral
+  over the golden interval), less the overspend so far spread over the next
+  second. **Two passes**: a `FirstPass` codes the clip at one quantiser;
+  with its statistics in `Config::two_pass` the clip's remaining budget is
+  divided by first-pass size^0.8 (key and golden frames weighted as above),
+  and each frame's search starts from its own first-pass complexity.
 - **Coefficient probability updates**: a first pass over the frame
   counts how each coefficient context's first three probabilities were
   used, the compressed header sends the new probabilities that save more
   than their update costs (the specification's `diff_update_prob` code),
   and a second pass codes the frame with them, replaying the first pass's
-  block decisions. Between 2% and 9% smaller than the default probabilities
-  on the content below.
+  decisions.
+- Up to 12-bit: the high-bit-depth quantiser tables, and the extra high
+  bits of category-6 tokens (coefficients past 16 450).
 - A loop filter level derived from the quantiser (or set).
 - A boolean encoder that is the exact inverse of the decoder's, and the
   minimum number of tile columns the frame width requires.
@@ -96,48 +128,115 @@ Profile 0 (8-bit 4:2:0), one packet per frame, any size from 1x1 up:
 The encoder reconstructs through the decoder's own prediction, motion
 vector prediction and inverse-transform code, and keeps its reference
 frames by decoding its own packets: what it predicts from is what a decoder
-has. Debug builds also compare its reconstruction with the decoded packet
-sample by sample.
+has, and `Encoder::reconstruction()` returns it (the last frame, exactly as
+a decoder outputs it). Debug builds also loop filter the encoder's own
+reconstruction and compare it with the decoded packet sample by sample.
+`Encoder::force_keyframe()`, `last_quantizer()` and `last_was_keyframe()`
+complete the API.
 
 Not there yet (in rough order of value):
 
-- **Rate control** — only a fixed quantiser; no target bitrate, two-pass,
-  or adaptive quantisation (segmentation).
-- **Partition and transform-size search** — the partition is fixed; no
-  `TX_MODE_SELECT`, no sub-8x8 blocks.
-- **More references** — only LAST; no golden / alt-ref frames, hidden
-  frames, compound prediction, or reference scaling.
+- **Speed.** Single-threaded scalar Rust: at 352x288, about 1.7 frames/s at the default speed 1, 0.6 at speed 0
+  and 10 at speed 2 (1.2 / 0.6 / 12 with LAST only).
+- **Sub-8x8 blocks** (4x4, 4x8, 8x4 partitions of an 8x8), and the
+  transform size is searched for the modes chosen at the largest one rather
+  than jointly.
+- **ALTREF, hidden frames and compound prediction** — compound prediction
+  needs two references on opposite sides in time (different sign biases),
+  i.e. a frame coded ahead of its display time and not shown; there is no
+  lookahead. No reference scaling.
 - **Other probability updates** — only the coefficient probabilities are
   updated; mode, partition, skip and motion vector probabilities stay at
   their defaults, and inter frames are error resilient, so there is no
   backward adaptation and no motion vectors from the previous frame. No
   high-precision (1/8) motion vectors, no switchable interpolation filters.
-- **Profiles 1–3.** What they need: the profile bits and colour config
-  (bit depth and subsampling fields) in the header; source padding, the
-  plane geometry and the distortion sums generalised from the hard-coded
-  4:2:0 shifts (the reconstruction engine — the decoder's — already handles
-  every format); for 4:2:2 and 4:4:0, falling back to a split where a forced
-  edge partition gives a chroma block size the specification forbids; for
-  10 / 12-bit, the high-bit-depth quantiser tables, the extra `high_bit`s of
-  category-6 tokens, and the rate-distortion multiplier scaled by
-  2^(2(bitdepth - 8)). Samples are already `u16` throughout.
-- Speed: about 12 frames/s at 352x288, single-threaded.
+- **Adaptive quantisation** (segmentation), and rate control below the
+  frame (a frame's quantiser is uniform). No buffer model (VBV / CBR
+  constraints) beyond the overspend correction.
+- A first pass that is a full encode at one quantiser (it doubles the
+  time), not a cheap analysis.
 
-Measured on the decoded frames of `vp90-2-03-size-226x226.webm` (10 frames
-of natural video, `tests/encode.rs`), 16x16 blocks, a key frame then nine
-inter frames:
+### Measurements
 
-| quantiser | bytes (10 frames) | key frame | per inter frame | PSNR Y | PSNR U | PSNR V |
-|---|---|---|---|---|---|---|
-| 16 | 141 491 | 24 022 | 13 052 | 49.87 dB | 51.54 dB | 51.24 dB |
-| 48 | 79 581 | 16 110 | 7 052 | 43.48 dB | 47.54 dB | 47.15 dB |
-| 96 | 49 031 | 11 221 | 4 201 | 38.84 dB | 44.69 dB | 44.21 dB |
-| 160 | 18 921 | 5 091 | 1 537 | 31.56 dB | 39.21 dB | 38.70 dB |
-| 240 | 4 337 | 795 | 394 | 22.63 dB | 32.67 dB | 32.49 dB |
-| 0 (lossless) | 245 092 | | | exact | exact | exact |
+Measured with `tests/encode.rs` (`cargo test --release --test encode --
+--ignored --nocapture` for the long ones; the 352x288 clips need
+`tools/fetch-vectors.sh`), on the decoded frames of test vectors,
+single-threaded.
 
-At quantiser 64 the ten frames take 66 184 bytes with inter frames and
-131 406 coded all-intra.
+**What each tool saves**, as BD-rate (the average bitrate difference at
+equal luma PSNR, over quantisers 40, 80, 120, 160 and 200) against the
+fixed 16x16 partition with LAST only:
+
+| | 226x226, 10 frames | 352x288, 40 frames (`droppable_1`) | 352x288 frames/s |
+|---|---|---|---|
+| fixed 32x32 partition (speed 2) | +36.0% | +17.0% | 6.2 |
+| transform-size search alone (16x16 partition) | −14.1% | −3.8% ¹ | 7.8 ¹ |
+| partition search alone (largest transforms) | −24.8% | −25.7% ¹ | 2.6 ¹ |
+| speed 1, LAST only | −33.1% | −24.6% | 1.2 |
+| speed 0, LAST only | −36.1% | −27.2% | 0.6 |
+| speed 1 + GOLDEN every 8, coded finer (**the default**) | −30.2% | −33.4% | 1.7 |
+| speed 0 + GOLDEN every 8 | −33.1% | −36.0% | 0.6 |
+| speed 2 (16x16) + GOLDEN every 8 | +3.7% | −7.5% | 10.3 |
+
+¹ Measured on the first 20 frames, with temporary settings that are not
+`Config` options. GOLDEN costs on the 10-frame clip — the finer golden
+frame (frame 8) has only one frame after it to pay off — and gains
+11.7% at speed 1 over 40 frames (2.9% of it from the reference, the rest
+from coding the golden frame finer).
+
+**Fixed quantiser**, the default settings, `vp90-2-03-size-226x226.webm`
+(10 frames, a key frame then nine inter frames); the previous release
+(fixed 16x16 partition, LAST only) for comparison:
+
+| quantiser | bytes | key frame | per inter frame | PSNR Y | PSNR U | PSNR V | previous release |
+|---|---|---|---|---|---|---|---|
+| 16 | 109 548 | 18 592 | 10 106 | 50.64 dB | 51.81 dB | 51.46 dB | 141 491 bytes, 49.87 dB |
+| 48 | 57 591 | 12 094 | 5 055 | 44.73 dB | 48.15 dB | 47.67 dB | 79 581 bytes, 43.48 dB |
+| 96 | 36 158 | 9 655 | 2 945 | 40.35 dB | 45.81 dB | 45.21 dB | 49 031 bytes, 38.84 dB |
+| 160 | 17 026 | 5 087 | 1 327 | 33.33 dB | 40.44 dB | 39.78 dB | 18 921 bytes, 31.56 dB |
+| 240 | 5 465 | 731 | 526 | 23.64 dB | 33.49 dB | 33.01 dB | 4 337 bytes, 22.63 dB |
+| 0 (lossless) | 227 690 | | | exact | exact | exact | 245 092 bytes |
+
+At quantiser 64 the ten frames take 47 392 bytes with inter frames and
+117 720 coded all-intra.
+
+**Every profile**: the first four frames of the same clip converted to
+each format (chroma resampled by nearest neighbour; 10 and 12 bits by
+widening the 2x2 mean of the 8-bit samples, so the low bits carry detail),
+bytes for four frames and mean PSNR against the format's peak:
+
+| | q 32 | q 96 | q 192 |
+|---|---|---|---|
+| 8-bit 4:2:0 (profile 0) | 27 627 B, Y 47.18 / U 50.01 / V 49.65 dB | 14 013 B, 40.35 / 45.36 / 44.93 | 3 599 B, 28.97 / 36.33 / 35.76 |
+| 8-bit 4:2:2 (profile 1) | 30 872 B, 47.18 / 50.19 / 49.82 | 15 031 B, 40.38 / 45.79 / 45.45 | 3 816 B, 29.03 / 38.13 / 37.58 |
+| 8-bit 4:4:0 (profile 1) | 30 975 B, 47.18 / 50.24 / 49.81 | 14 965 B, 40.36 / 45.96 / 45.45 | 3 738 B, 29.03 / 37.46 / 37.73 |
+| 8-bit 4:4:4 (profile 1) | 36 088 B, 47.09 / 50.62 / 50.12 | 16 462 B, 40.31 / 46.31 / 45.79 | 3 917 B, 28.98 / 39.34 / 38.80 |
+| 10-bit 4:2:0 (profile 2) | 30 987 B, 49.63 / 52.85 / 52.42 | 14 033 B, 40.62 / 45.91 / 45.46 | 3 615 B, 29.07 / 36.27 / 36.01 |
+| 10-bit 4:2:2 (profile 3) | 34 752 B, 49.60 / 52.88 / 52.38 | 14 985 B, 40.61 / 46.42 / 46.00 | 3 810 B, 29.02 / 37.95 / 37.49 |
+| 10-bit 4:4:0 (profile 3) | 34 985 B, 49.59 / 52.89 / 52.29 | 14 983 B, 40.59 / 46.61 / 45.94 | 3 761 B, 29.05 / 37.33 / 37.59 |
+| 10-bit 4:4:4 (profile 3) | 40 933 B, 49.56 / 53.45 / 52.82 | 16 417 B, 40.60 / 46.94 / 46.41 | 3 929 B, 29.01 / 39.45 / 38.79 |
+| 12-bit 4:2:0 (profile 2) | 32 107 B, 50.17 / 53.42 / 52.97 | 14 030 B, 40.69 / 46.06 / 45.47 | 3 595 B, 29.06 / 36.43 / 35.93 |
+| 12-bit 4:2:2 (profile 3) | 36 112 B, 50.16 / 53.40 / 52.86 | 15 133 B, 40.67 / 46.41 / 46.00 | 3 803 B, 29.03 / 37.78 / 37.48 |
+| 12-bit 4:4:0 (profile 3) | 36 522 B, 50.15 / 53.45 / 52.83 | 15 042 B, 40.67 / 46.77 / 46.04 | 3 798 B, 29.03 / 37.49 / 37.54 |
+| 12-bit 4:4:4 (profile 3) | 42 740 B, 50.12 / 53.99 / 53.35 | 16 480 B, 40.65 / 47.00 / 46.50 | 3 933 B, 29.04 / 39.46 / 38.74 |
+
+**Rate control**, 30 frames/s, the achieved bitrate over the whole clip
+and its mean luma PSNR:
+
+| clip | target | one pass | two passes |
+|---|---|---|---|
+| `vp90-2-09-aq2.webm`, 352x240, 100 frames | 150 kb/s | 160.6 kb/s (+7.1%), 22.54 dB | 150.8 kb/s (+0.5%), 22.71 dB |
+| | 400 kb/s | 363.2 kb/s (−9.2%), 26.49 dB | 398.9 kb/s (−0.3%), 27.41 dB |
+| | 1000 kb/s | 1045.3 kb/s (+4.5%), 32.87 dB | 999.7 kb/s (−0.0%), 33.24 dB |
+| `vp90-2-12-droppable_1.ivf`, 352x288, 99 frames | 150 kb/s | 155.0 kb/s (+3.3%), 32.06 dB | 150.0 kb/s (+0.0%), 31.84 dB |
+| | 400 kb/s | 403.9 kb/s (+1.0%), 36.48 dB | 400.2 kb/s (+0.0%), 37.37 dB |
+| | 1000 kb/s | 1011.9 kb/s (+1.2%), 42.20 dB | 1000.0 kb/s (+0.0%), 42.97 dB |
+| 226x226 clip forwards and back, 40 frames (`cargo test`) | 300 kb/s | 336.0 kb/s (+12.0%) | 300.0 kb/s (+0.0%) |
+| | 1200 kb/s | 1303.9 kb/s (+8.7%) | 1199.6 kb/s (−0.0%) |
+
+One pass overshoots most on short clips: the first key frame is coded
+before anything is known about the content, and the overspend is paid back
+over the next second.
 
 ## How it is checked
 
@@ -169,11 +268,18 @@ At quantiser 64 the ten frames take 66 184 bytes with inter frames and
   the first frame (a key frame) of 352 of the 353 vectors is bit-exact.
   Fourteen small vectors are committed in [`tests/data`](tests/data/README.md)
   so `cargo test` checks real streams without the download.
-- **The encoder** (`tests/encode.rs`): every packet decodes; lossless is
-  exact at every size from 1x1 and every block size; PSNR falls and size
-  falls as the quantiser rises; inter frames cost less than intra; and
-  debug builds check the encoder's reconstruction against the decoder's
-  output sample by sample.
+- **The encoder** (`tests/encode.rs`), with this crate's decoder as the
+  only oracle: every packet decodes, with a fresh decoder, to exactly
+  `Encoder::reconstruction()`; at every bit depth (8, 10, 12) and chroma
+  format (4:2:0, 4:2:2, 4:4:0, 4:4:4), sizes 1x1, 17x33, 66x34 and
+  130x72, searched and fixed partitions, lossless is exact and the lossy
+  quantisers keep their PSNR; full-swing 10 / 12-bit content at the finest
+  quantisers (coefficients that need the category-6 high bits) decodes
+  exactly; PSNR falls and size falls as the quantiser rises at every
+  profile; inter frames cost less than intra; rate control meets its
+  target (one pass within 15%, two within 5%, on 40 frames); and debug
+  builds loop filter the encoder's own reconstruction and compare it with
+  the decoded packet sample by sample, every frame.
 - **Malformed input** (`tests/fuzz.rs`, proptest): arbitrary bytes, and the
   committed vectors with bits flipped, bytes cut and garbage spliced in,
   decoded in debug builds (overflow checks on) — errors, never a panic.
@@ -220,17 +326,30 @@ for packet in packets {
     }
 }
 
-// Encoding: 8-bit 4:2:0 frames in, one packet each out.
+// Encoding: frames in, one packet each out.
 let mut cfg = vp9::Config::new(1280, 720);
-cfg.quantizer = 60;
-let mut enc = vp9::Encoder::new(cfg);
+cfg.bit_depth = 10; // 8, 10 or 12
+cfg.chroma = vp9::ChromaFormat::Yuv420; // or Yuv422, Yuv440, Yuv444
+cfg.quantizer = 60; // a fixed quantiser, or:
+cfg.target_bitrate = Some(2_000_000); // bits per second at cfg.frame_rate
+let mut enc = vp9::Encoder::new(cfg.clone());
 let packet = enc.encode(&frame)?;
+let decoded = enc.reconstruction(); // what a decoder will output
+
+// Two passes: measure the clip first.
+let mut first = vp9::encoder::FirstPass::new(cfg.clone());
+for f in &frames {
+    first.add(f)?;
+}
+cfg.two_pass = Some(first.finish());
 ```
 
 `vp9::ivf` reads and writes IVF; `vp9::superframe` splits and builds
 superframes. The examples decode IVF to raw planar video with per-frame
 MD5s (`cargo run --release --example ivfdec -- in.ivf out.yuv`) and encode
-raw I420 to IVF (`--example ivfenc -- in.yuv 352 288 out.ivf 60`).
+raw planar video to IVF at a quantiser or a bitrate (two-pass), any bit
+depth and chroma format (`--example ivfenc -- in.yuv 352 288 out.ivf 60`,
+`… out.ivf 500k 10 444`).
 
 ## Specification notes
 

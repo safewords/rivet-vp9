@@ -27,7 +27,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Tests (committed vectors, encoder, units)
         run: cargo test --release
-      - name: Property tests and encoder self-check with overflow checks (debug)
+      - name: Property tests and encoder self-check with debug assertions and overflow checks (test profile, optimised)
         run: cargo test --test fuzz --test encode
 
   # The full set of public VP9 test vectors (about 34 MB), downloaded from

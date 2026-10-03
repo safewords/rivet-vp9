@@ -563,9 +563,10 @@ fn tool_gains() {
             ("speed 2, 32x32, LAST only", 2, 32, 0),
             ("speed 1, LAST only", 1, 16, 0),
             ("speed 0, LAST only", 0, 16, 0),
-            ("speed 1, GOLDEN every 8", 1, 16, 8),
+            ("speed 2, 16x16, GOLDEN every 8", 2, 16, 8),
+            ("speed 1, GOLDEN every 8 (the default)", 1, 16, 8),
             ("speed 1, GOLDEN every 16", 1, 16, 16),
-            ("speed 1, GOLDEN key frames only", 1, 16, 1000),
+            ("speed 0, GOLDEN every 8", 0, 16, 8),
         ] {
             if !only.is_empty() && !label.contains(&only) && base.is_some() {
                 continue;
