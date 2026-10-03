@@ -102,6 +102,92 @@ impl<'a> BoolDecoder<'a> {
     }
 }
 
+/// Where the encoder writes bools: the [`BoolEncoder`], or a [`BitCounter`]
+/// that only adds up what they would cost (the encoder's trial codings).
+pub(crate) trait Sink {
+    /// Writes `bit` with probability `p` (of a 0, out of 256).
+    fn write(&mut self, bit: bool, p: u8);
+
+    /// An `n`-bit literal, most significant bit first.
+    fn literal(&mut self, n: u32, v: u32) {
+        for i in (0..n).rev() {
+            self.write((v >> i) & 1 != 0, 128);
+        }
+    }
+
+    /// Encodes `value` with `tree`; `prob` gives the probability of each
+    /// node index visited.
+    fn tree(&mut self, tree: &[i8], value: u8, mut prob: impl FnMut(usize) -> u8)
+    where
+        Self: Sized,
+    {
+        // Find the path from the root to the leaf by search.
+        fn path(
+            tree: &[i8],
+            node: usize,
+            value: u8,
+            out: &mut [(usize, bool)],
+            n: &mut usize,
+        ) -> bool {
+            for b in 0..2 {
+                let t = tree[node + b];
+                out[*n] = (node, b == 1);
+                *n += 1;
+                if t <= 0 {
+                    if (-t) as u8 == value {
+                        return true;
+                    }
+                } else if path(tree, t as usize, value, out, n) {
+                    return true;
+                }
+                *n -= 1;
+            }
+            false
+        }
+        let mut p = [(0usize, false); 16];
+        let mut n = 0;
+        let found = path(tree, 0, value, &mut p, &mut n);
+        debug_assert!(found, "value not in tree");
+        for &(node, bit) in &p[..n] {
+            self.write(bit, prob(node >> 1));
+        }
+    }
+}
+
+/// The cost in bits of a bool of probability `p` (of a 0): `[cost of 0,
+/// cost of 1]`.
+pub(crate) fn bool_cost(p: u8) -> [f64; 2] {
+    static TABLE: std::sync::OnceLock<[[f64; 2]; 256]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut t = [[0.0; 2]; 256];
+        for (p, c) in t.iter_mut().enumerate() {
+            let p0 = (p.max(1) as f64) / 256.0;
+            *c = [-p0.log2(), -(1.0 - p0).log2()];
+        }
+        t
+    })[p as usize]
+}
+
+/// A [`Sink`] that counts the bits a [`BoolEncoder`] would spend.
+#[derive(Default, Debug, Clone, Copy)]
+pub(crate) struct BitCounter {
+    pub bits: f64,
+}
+
+impl Sink for BitCounter {
+    #[inline]
+    fn write(&mut self, bit: bool, p: u8) {
+        self.bits += bool_cost(p)[bit as usize];
+    }
+}
+
+impl Sink for BoolEncoder {
+    #[inline]
+    fn write(&mut self, bit: bool, p: u8) {
+        BoolEncoder::write(self, bit, p);
+    }
+}
+
 /// The boolean encoder: produces a stream [`BoolDecoder`] reads back.
 ///
 /// It tracks the low end of the coding interval at the decoder's scale:
@@ -167,39 +253,6 @@ impl BoolEncoder {
             self.buf.push(byte);
             self.count -= 8;
             self.low &= (1u64 << (8 + self.count)) - 1;
-        }
-    }
-
-    pub(crate) fn literal(&mut self, n: u32, v: u32) {
-        for i in (0..n).rev() {
-            self.write((v >> i) & 1 != 0, 128);
-        }
-    }
-
-    /// Encodes `value` with `tree`; `prob` gives the probability of each
-    /// node index visited.
-    pub(crate) fn tree(&mut self, tree: &[i8], value: u8, mut prob: impl FnMut(usize) -> u8) {
-        // Find the path from the root to the leaf by search.
-        fn path(tree: &[i8], node: usize, value: u8, out: &mut Vec<(usize, bool)>) -> bool {
-            for b in 0..2 {
-                let t = tree[node + b];
-                out.push((node, b == 1));
-                if t <= 0 {
-                    if (-t) as u8 == value {
-                        return true;
-                    }
-                } else if path(tree, t as usize, value, out) {
-                    return true;
-                }
-                out.pop();
-            }
-            false
-        }
-        let mut p = Vec::with_capacity(8);
-        let found = path(tree, 0, value, &mut p);
-        debug_assert!(found, "value not in tree");
-        for (node, bit) in p {
-            self.write(bit, prob(node >> 1));
         }
     }
 

@@ -49,7 +49,7 @@ pub use rc::{FirstPass, FirstPassStats, KEY_BOOST};
 use std::sync::Arc;
 
 use crate::bits::BitWriter;
-use crate::bool_coder::BoolEncoder;
+use crate::bool_coder::{BoolEncoder, Sink};
 use crate::consts::*;
 use crate::decoder::{Decoder, FrameDec, RefFrame};
 use crate::frame::{ChromaFormat, ColorSpace, Frame};
@@ -89,8 +89,16 @@ pub struct Config {
     pub keyframe_interval: u32,
     /// Loop filter level 0 to 63; `None` derives it from the quantiser.
     pub loop_filter_level: Option<u8>,
-    /// Block size of the fixed partition: 8, 16, 32 or 64.
+    /// Block size of the fixed partition: 8, 16, 32 or 64 (used at
+    /// [`Config::speed`] 2; the slower speeds search the partition).
     pub block_size: u32,
+    /// Speed against compression: 0 searches the partition (every
+    /// partition type, 64x64 down to 8x8) and every transform size; 1 (the
+    /// default) the partition with NONE and SPLIT (HORZ / VERT only where
+    /// the frame edge forces them) and the two largest transform sizes; 2
+    /// codes the fixed partition of [`Config::block_size`] with the largest
+    /// transform that fits.
+    pub speed: u8,
     /// Motion search range in whole pixels.
     pub search_range: u32,
     /// Colour space to signal.
@@ -120,6 +128,7 @@ impl Config {
             keyframe_interval: 60,
             loop_filter_level: None,
             block_size: 16,
+            speed: 1,
             search_range: 16,
             color_space: ColorSpace::Bt601,
             full_range: false,
@@ -368,7 +377,7 @@ impl Encoder {
         src: &tile::Source,
         last: Option<Arc<RefFrame>>,
         probs: &Probs,
-        replay: Option<Vec<tile::Choice>>,
+        replay: Option<Vec<tile::Decision>>,
     ) -> Pass {
         let keep = replay.is_some();
         let seg = Segmentation::default();
@@ -458,7 +467,13 @@ impl Encoder {
             mi_rows,
             sb64_cols,
             sb64_rows,
-            tx_mode: if lossless { ONLY_4X4 } else { ALLOW_32X32 },
+            tx_mode: if lossless {
+                ONLY_4X4
+            } else if self.cfg.speed <= 1 {
+                TX_MODE_SELECT
+            } else {
+                ALLOW_32X32
+            },
             reference_mode: SINGLE_REFERENCE,
             ..FrameHeader::default()
         }
@@ -554,7 +569,7 @@ impl Encoder {
 struct Pass {
     tiles: Vec<u8>,
     stats: Box<tile::CoefStats>,
-    decisions: Vec<tile::Choice>,
+    decisions: Vec<tile::Decision>,
     /// Debug builds, second pass: the reconstruction, loop filtered.
     recon: Option<[crate::decoder::PlaneBuf; 3]>,
 }
@@ -683,7 +698,14 @@ fn compressed_header(h: &FrameHeader, old: &Probs, new: &Probs) -> Vec<u8> {
     let no = |e: &mut BoolEncoder| e.write(false, 252);
     if !h.lossless {
         e.literal(2, ALLOW_32X32 as u32);
-        e.literal(1, 0); // tx_mode_select
+        e.literal(1, (h.tx_mode == TX_MODE_SELECT) as u32); // tx_mode_select
+        if h.tx_mode == TX_MODE_SELECT {
+            // tx_mode_probs(): no updates (8x8: 1 per context, 16x16: 2,
+            // 32x32: 3; two contexts each).
+            for _ in 0..2 * (1 + 2 + 3) {
+                no(&mut e);
+            }
+        }
     }
     // read_coef_probs()
     let max_tx = TX_MODE_TO_BIGGEST_TX_SIZE[h.tx_mode as usize] as usize;
