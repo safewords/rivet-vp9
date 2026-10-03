@@ -2,13 +2,16 @@
 //! and 4:4:4), a fixed quantiser.
 //!
 //! The profile follows from [`Config::bit_depth`] and [`Config::chroma`]
-//! ([`Config::profile`]). Every frame is one packet. Key frames code each block with the best of
-//! the ten intra modes; inter frames add single-reference prediction from
-//! the previous frame (motion search to quarter-sample precision, NEARESTMV
-//! / NEARMV / ZEROMV / NEWMV) with intra as the alternative. The partition
-//! is fixed (square blocks of [`Config::block_size`], smaller where the
-//! frame edge forces it), the transform is the largest that fits the block,
-//! and quantisation is plain rounding with a dead zone. The coefficient
+//! ([`Config::profile`]). Every frame is one packet. Key frames code each
+//! block with the best of the ten intra modes; inter frames add
+//! single-reference prediction from LAST (the previous frame) or GOLDEN (an
+//! older frame, coded finer) — motion search to quarter-sample precision,
+//! NEARESTMV / NEARMV / ZEROMV / NEWMV — with intra as the alternative. The
+//! partition and transform size are searched by rate-distortion cost
+//! ([`Config::speed`] 0 and 1), or fixed (speed 2: square blocks of
+//! [`Config::block_size`], smaller where the frame edge forces it, the
+//! largest transform that fits), and quantisation is plain rounding with a
+//! dead zone. The coefficient
 //! probabilities that pay for their update are sent in each frame's
 //! compressed header (judged on a first coding pass); the others stay at the
 //! specification's defaults, and there is no backward adaptation (inter
@@ -32,19 +35,21 @@
 //! 12%; the attempt nearest the budget is sent.
 //!
 //! - **One pass**: a frame's budget is the bitrate's share per frame (a key
-//!   frame [`KEY_BOOST`] times that), less the overspend so far spread over
+//!   frame [`KEY_BOOST`] times that, a frame that refreshes GOLDEN
+//!   [`GOLDEN_BOOST`] times), less the overspend so far spread over
 //!   the next second or the frames before the next key frame.
 //! - **Two passes**: a [`FirstPass`] codes the clip at one quantiser; with
 //!   its statistics in [`Config::two_pass`], what is left of the clip's
 //!   budget is divided among the frames left by weight — the first-pass
-//!   size to the power 0.8, key frames times [`KEY_BOOST`] — and each
+//!   size to the power 0.8, key frames times [`KEY_BOOST`], golden frames
+//!   times [`GOLDEN_BOOST`] — and each
 //!   frame's search starts from its own first-pass complexity.
 
 mod fdct;
 mod rc;
 mod tile;
 
-pub use rc::{FirstPass, FirstPassStats, KEY_BOOST};
+pub use rc::{FirstPass, FirstPassStats, GOLDEN_BOOST, KEY_BOOST};
 
 use std::sync::Arc;
 
@@ -99,6 +104,12 @@ pub struct Config {
     /// codes the fixed partition of [`Config::block_size`] with the largest
     /// transform that fits.
     pub speed: u8,
+    /// Inter frames search two references: LAST (the previous frame) and
+    /// GOLDEN, the last key frame, replaced by every this-many-th frame
+    /// after it (default 8), which is coded finer: at 3/4 of
+    /// [`Config::quantizer`], or with [`GOLDEN_BOOST`] times an inter
+    /// frame's budget. 0 searches LAST only.
+    pub golden_interval: u32,
     /// Motion search range in whole pixels.
     pub search_range: u32,
     /// Colour space to signal.
@@ -130,6 +141,7 @@ impl Config {
             block_size: 16,
             speed: 1,
             search_range: 16,
+            golden_interval: 8,
             color_space: ColorSpace::Bt601,
             full_range: false,
             bit_depth: 8,
@@ -181,7 +193,14 @@ pub struct Encoder {
     last_was_key: bool,
     last_q: u8,
     rc: rc::RateCtl,
+    /// Frames since the last key frame, and whether this one refreshes
+    /// GOLDEN.
+    since_key: u64,
+    refresh_golden: bool,
 }
+
+/// The LAST, GOLDEN and ALTREF frames.
+type Refs = [Option<Arc<RefFrame>>; 3];
 
 /// A frame coded at one quantiser, not yet sent.
 struct Coded {
@@ -205,6 +224,8 @@ impl Encoder {
             recon: None,
             last_was_key: false,
             last_q: 0,
+            since_key: 0,
+            refresh_golden: false,
             cfg,
         }
     }
@@ -253,13 +274,29 @@ impl Encoder {
         }
         let interval = self.cfg.keyframe_interval.max(1) as u64;
         let key = self.force_key || self.frames.is_multiple_of(interval);
-        let last: Option<Arc<RefFrame>> = if key { None } else { self.dec.ref_slot(0) };
-        let key = key || last.is_none();
+        let key = key || self.dec.ref_slot(0).is_none();
+        // LAST, GOLDEN and ALTREF are slots 0, 1 and 2.
+        let refs: Refs = if key {
+            Default::default()
+        } else {
+            [0, 1, 2].map(|i| self.dec.ref_slot(i))
+        };
+        self.since_key = if key { 0 } else { self.since_key + 1 };
+        let g = self.cfg.golden_interval as u64;
+        self.refresh_golden = !key && g > 0 && self.since_key.is_multiple_of(g);
         let src = tile::Source::new(frame, &self.header(key, 0));
         let coded = if self.cfg.target_bitrate.is_some() {
-            self.rate_controlled(&src, key, last, interval)?
+            self.rate_controlled(&src, key, &refs, interval)?
         } else {
-            self.code_frame(&src, key, last, self.cfg.quantizer)?
+            // A frame that becomes GOLDEN is predicted from for the next
+            // golden_interval frames: it is coded finer.
+            let q = self.cfg.quantizer;
+            let q = if self.refresh_golden && q > 0 {
+                ((q as u32 * 3) / 4).max(1) as u8
+            } else {
+                q
+            };
+            self.code_frame(&src, key, &refs, q)?
         };
         let Coded { packet, recon, q } = coded;
         // Keep the references a decoder will have.
@@ -300,11 +337,11 @@ impl Encoder {
         &mut self,
         src: &tile::Source,
         key: bool,
-        last: Option<Arc<RefFrame>>,
+        refs: &Refs,
         interval: u64,
     ) -> Result<Coded> {
         let to_key = interval - self.frames % interval;
-        let target = self.rc.budget(&self.cfg, key, to_key);
+        let target = self.rc.budget(&self.cfg, key, self.refresh_golden, to_key);
         let mut q = self.rc.first_q(&self.cfg, key, target);
         // With nothing known about the content, the first frame may take
         // a few more attempts.
@@ -318,7 +355,7 @@ impl Encoder {
         let mut best: Option<Coded> = None;
         let miss = |bits: f64| (bits.max(1.0) / target.max(1.0)).ln().abs();
         loop {
-            let c = self.code_frame(src, key, last.clone(), q)?;
+            let c = self.code_frame(src, key, refs, q)?;
             let bits = c.packet.len() as f64 * 8.0;
             tries.push(rc::Attempt { q, bits });
             if best
@@ -338,13 +375,7 @@ impl Encoder {
     }
 
     /// Codes the frame at quantiser `q`: the packet, nothing committed.
-    fn code_frame(
-        &self,
-        src: &tile::Source,
-        key: bool,
-        last: Option<Arc<RefFrame>>,
-        q: u8,
-    ) -> Result<Coded> {
+    fn code_frame(&self, src: &tile::Source, key: bool, refs: &Refs, q: u8) -> Result<Coded> {
         let h = self.header(key, q);
         // A first pass with the default probabilities measures the
         // coefficient statistics; the coefficient probabilities that pay
@@ -352,9 +383,9 @@ impl Encoder {
         let defaults = Probs::default();
         // The second pass replays the first's block decisions: they do not
         // depend on the probabilities.
-        let first = self.encode_pass(&h, src, last.clone(), &defaults, None);
+        let first = self.encode_pass(&h, src, refs, &defaults, None);
         let probs = updated_coef_probs(&defaults, &first.stats, h.tx_mode);
-        let second = self.encode_pass(&h, src, last, &probs, Some(first.decisions));
+        let second = self.encode_pass(&h, src, refs, &probs, Some(first.decisions));
         let comp = compressed_header(&h, &defaults, &probs);
         let mut w = BitWriter::default();
         self.uncompressed_header(&mut w, &h, comp.len())?;
@@ -375,7 +406,7 @@ impl Encoder {
         &self,
         h: &FrameHeader,
         src: &tile::Source,
-        last: Option<Arc<RefFrame>>,
+        refs: &Refs,
         probs: &Probs,
         replay: Option<Vec<tile::Decision>>,
     ) -> Pass {
@@ -383,13 +414,20 @@ impl Encoder {
         let seg = Segmentation::default();
         let mut probs = probs.clone();
         let mut counts = Box::<Counts>::default();
-        let refs: [Option<Arc<RefFrame>>; 3] = if h.frame_is_intra {
-            Default::default()
-        } else {
-            [last.clone(), last.clone(), last.clone()]
-        };
-        let mut fd = FrameDec::new(h, &seg, &mut probs, &mut counts, &[], None, refs);
-        let mut te = tile::TileEncoder::new(&self.cfg, h, src, last.as_deref());
+        // The references searched: LAST, and GOLDEN when it is another
+        // picture.
+        let mut search: Vec<(i8, &RefFrame)> = Vec::new();
+        if let Some(last) = &refs[0] {
+            search.push((LAST_FRAME, last));
+            if let Some(golden) = &refs[1]
+                && self.cfg.golden_interval > 0
+                && !Arc::ptr_eq(golden, last)
+            {
+                search.push((GOLDEN_FRAME, golden));
+            }
+        }
+        let mut fd = FrameDec::new(h, &seg, &mut probs, &mut counts, &[], None, refs.clone());
+        let mut te = tile::TileEncoder::new(&self.cfg, h, src, &search);
         te.replay = replay.map(|v| (v, 0));
         let t = te.encode_tiles(&mut fd);
         let recon = if keep && cfg!(debug_assertions) {
@@ -451,7 +489,11 @@ impl Encoder {
             color_range: self.cfg.full_range || self.cfg.color_space == ColorSpace::Rgb,
             subsampling_x: ss_x,
             subsampling_y: ss_y,
-            refresh_frame_flags: if key { 0xff } else { 0x01 },
+            refresh_frame_flags: if key {
+                0xff
+            } else {
+                0x01 | (self.refresh_golden as u8) << 1
+            },
             ref_frame_idx: [0, 1, 2],
             width: w,
             height: ht,

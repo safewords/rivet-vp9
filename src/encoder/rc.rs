@@ -26,6 +26,11 @@ use crate::{Error, Result};
 /// over an inter frame of the same first-pass size (two passes).
 pub const KEY_BOOST: f64 = 4.0;
 
+/// A frame that refreshes GOLDEN: its budget in inter frame budgets (one
+/// pass), or its weight over an inter frame of the same first-pass size
+/// (two passes).
+pub const GOLDEN_BOOST: f64 = 2.0;
+
 /// A second pass weighs each frame by its first-pass size to this power.
 const TWO_PASS_EXPONENT: f64 = 0.8;
 
@@ -39,8 +44,8 @@ const FIRST_PASS_Q: u8 = 96;
 #[derive(Debug, Clone, PartialEq)]
 pub struct FirstPassStats {
     q: u8,
-    /// Bits of each frame, and whether it was a key frame.
-    frames: Vec<(u64, bool)>,
+    /// Bits of each frame, and its boost (key, golden or 1).
+    frames: Vec<(u64, f64)>,
 }
 
 impl FirstPassStats {
@@ -99,9 +104,14 @@ impl FirstPass {
     /// Codes the next frame of the clip and records its size.
     pub fn add(&mut self, frame: &Frame) -> Result<()> {
         let pkt = self.enc.encode(frame)?;
-        self.stats
-            .frames
-            .push((pkt.len() as u64 * 8, self.enc.last_was_key));
+        let boost = if self.enc.last_was_key {
+            KEY_BOOST
+        } else if self.enc.refresh_golden {
+            GOLDEN_BOOST
+        } else {
+            1.0
+        };
+        self.stats.frames.push((pkt.len() as u64 * 8, boost));
         Ok(())
     }
 
@@ -152,16 +162,14 @@ impl RateCtl {
     }
 
     /// The budget of the next frame, bits.
-    pub(crate) fn budget(&self, cfg: &Config, key: bool, frames_to_key: u64) -> f64 {
+    pub(crate) fn budget(&self, cfg: &Config, key: bool, golden: bool, frames_to_key: u64) -> f64 {
         if let Some(fp) = &cfg.two_pass
             && self.coded < fp.frames.len()
         {
             // A frame's weight: its first-pass size, compressed a little
-            // (easy frames get relatively more), key frames boosted (every
-            // later frame is predicted from them).
-            let w = |f: &(u64, bool)| {
-                (f.0 as f64).powf(TWO_PASS_EXPONENT) * if f.1 { KEY_BOOST } else { 1.0 }
-            };
+            // (easy frames get relatively more), key and golden frames
+            // boosted (later frames are predicted from them).
+            let w = |f: &(u64, f64)| (f.0 as f64).powf(TWO_PASS_EXPONENT) * f.1;
             let total = self.per_frame * fp.frames.len() as f64;
             let left: f64 = fp.frames[self.coded..].iter().map(w).sum();
             let share = w(&fp.frames[self.coded]) / left.max(1.0);
@@ -169,10 +177,20 @@ impl RateCtl {
                 total * w(&fp.frames[self.coded]) / fp.frames.iter().map(w).sum::<f64>().max(1.0);
             return ((total - self.spent) * share).clamp(0.25 * nominal, 4.0 * nominal);
         }
-        let base = if key {
-            self.per_frame * KEY_BOOST
+        // Over a golden interval the boosts are budget-neutral: the other
+        // inter frames give up what the golden frame gets.
+        let g = cfg.golden_interval as f64;
+        let inter = if g > 0.0 {
+            self.per_frame * g / (g - 1.0 + GOLDEN_BOOST)
         } else {
             self.per_frame
+        };
+        let base = if key {
+            self.per_frame * KEY_BOOST
+        } else if golden {
+            inter * GOLDEN_BOOST
+        } else {
+            inter
         };
         let window = (frames_to_key as f64).min(cfg.frame_rate.round()).max(4.0);
         (base - self.debt / window).clamp(0.25 * base, 4.0 * base)

@@ -523,7 +523,10 @@ fn bd_rate(a: &[(f64, f64)], b: &[(f64, f64)]) -> f64 {
     let lo = ca[0].0.max(cb[0].0);
     let hi = ca[ca.len() - 1].0.min(cb[cb.len() - 1].0);
     let at = |c: &[(f64, f64)], p: f64| {
-        let i = c.windows(2).position(|w| p <= w[1].0).unwrap_or(c.len() - 2);
+        let i = c
+            .windows(2)
+            .position(|w| p <= w[1].0)
+            .unwrap_or(c.len() - 2);
         let (p0, r0) = c[i];
         let (p1, r1) = c[i + 1];
         r0 + (r1 - r0) * (p - p0) / (p1 - p0)
@@ -548,18 +551,25 @@ fn tool_gains() {
         let f: Vec<Frame> = common::packets(&p)
             .iter()
             .filter_map(|pk| d.decode(pk).unwrap())
-            .take(20)
+            .take(40)
             .collect();
-        clips.push(("352x288 droppable_1, 20 frames", f));
+        clips.push(("352x288 droppable_1, 40 frames", f));
     }
     for (name, frames) in &clips {
         let mut base: Option<Vec<(f64, f64)>> = None;
-        for (label, speed, bs) in [
-            ("speed 2, 16x16", 2u8, 16u32),
-            ("speed 2, 32x32", 2, 32),
-            ("speed 1", 1, 16),
-            ("speed 0", 0, 16),
+        let only = std::env::var("VP9_GAINS").unwrap_or_default();
+        for (label, speed, bs, golden) in [
+            ("speed 2, 16x16, LAST only", 2u8, 16u32, 0u32),
+            ("speed 2, 32x32, LAST only", 2, 32, 0),
+            ("speed 1, LAST only", 1, 16, 0),
+            ("speed 0, LAST only", 0, 16, 0),
+            ("speed 1, GOLDEN every 8", 1, 16, 8),
+            ("speed 1, GOLDEN every 16", 1, 16, 16),
+            ("speed 1, GOLDEN key frames only", 1, 16, 1000),
         ] {
+            if !only.is_empty() && !label.contains(&only) && base.is_some() {
+                continue;
+            }
             let t = std::time::Instant::now();
             let pts: Vec<(f64, f64)> = [40u8, 80, 120, 160, 200]
                 .iter()
@@ -568,6 +578,7 @@ fn tool_gains() {
                     cfg.quantizer = q;
                     cfg.speed = speed;
                     cfg.block_size = bs;
+                    cfg.golden_interval = golden;
                     let (out, sizes) = round_trip(cfg, frames);
                     let y = frames
                         .iter()
@@ -580,7 +591,9 @@ fn tool_gains() {
                 .collect();
             let fps = 5.0 * frames.len() as f64 / t.elapsed().as_secs_f64();
             let bd = base.as_ref().map_or(0.0, |b| bd_rate(b, &pts));
-            eprintln!("{name}: {label}: BD-rate {bd:+.1}% vs speed 2 16x16, {fps:.1} frames/s, points {pts:.0?}");
+            eprintln!(
+                "{name}: {label}: BD-rate {bd:+.1}% vs the first, {fps:.1} frames/s, points {pts:.0?}"
+            );
             if base.is_none() {
                 base = Some(pts);
             }
