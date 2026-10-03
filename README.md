@@ -1,6 +1,6 @@
 # rivet-vp9
 
-[![CI](https://github.com/rivet-transcoder/rivet-vp9/actions/workflows/ci.yml/badge.svg)](https://github.com/rivet-transcoder/rivet-vp9/actions/workflows/ci.yml)
+[![CI](https://github.com/safewords/rivet-vp9/actions/workflows/ci.yml/badge.svg)](https://github.com/safewords/rivet-vp9/actions/workflows/ci.yml)
 
 A **VP9** decoder and encoder in Rust: no C, no system libraries, no build
 script, nothing to install on a build host. Written from the *VP9 Bitstream
@@ -12,7 +12,7 @@ not translated from any other implementation. The decoder is bit-exact on
 search and a target bitrate (one or two passes), and its frames decode to
 what it reconstructed, sample for sample.
 
-Written for the **[rivet](https://github.com/rivet-transcoder/rivet)**
+Written for the **[rivet](https://github.com/safewords/rivet)**
 transcoder, as its VP9 codec on both sides. Usable on its own by anything
 that has VP9 frames (from IVF, WebM / Matroska, MP4) and wants planar
 pictures back, or planar pictures and wants VP9.
@@ -27,7 +27,7 @@ dependency (`thiserror`), no features, no build script.
 
 ```toml
 [dependencies]
-vp9 = { package = "rivet-vp9", git = "https://github.com/rivet-transcoder/rivet-vp9", branch = "develop" }
+vp9 = { package = "rivet-vp9", git = "https://github.com/safewords/rivet-vp9", branch = "develop" }
 ```
 
 ## What it decodes
