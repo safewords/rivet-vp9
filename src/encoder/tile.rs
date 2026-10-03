@@ -33,7 +33,11 @@ impl Source {
         let mut planes: [Vec<u16>; 3] = Default::default();
         let mut stride = [0; 3];
         for p in 0..3 {
-            let (pw, ph) = if p == 0 { (w, ht) } else { (w >> 1, ht >> 1) };
+            let (pw, ph) = if p == 0 {
+                (w, ht)
+            } else {
+                (w >> h.subsampling_x, ht >> h.subsampling_y)
+            };
             let fp = f.planes[p];
             let mut v = vec![0u16; pw * ph];
             for y in 0..ph {
@@ -137,7 +141,11 @@ impl<'a> TileEncoder<'a> {
         src: &'a Source,
         last: Option<&'a RefFrame>,
     ) -> Self {
-        let q = AC_QLOOKUP[0][h.base_q_idx as usize] as f64 / 8.0;
+        // The quantiser step of the frame's bit depth: at 10 and 12 bits it
+        // is about 4 and 16 times the 8-bit step, so the multiplier (squared
+        // error per bit) scales by 2^(2(BitDepth - 8)) with it, as the
+        // squared error itself does.
+        let q = AC_QLOOKUP[bd_index(h)][h.base_q_idx as usize] as f64 / 8.0;
         let lambda = 0.12 * q * q;
         let mut te = TileEncoder {
             cfg,
@@ -169,6 +177,25 @@ impl<'a> TileEncoder<'a> {
             te.pad_stride = ps;
         }
         te
+    }
+
+    /// (subsampling_x, subsampling_y) of `plane`.
+    fn ss(&self, plane: usize) -> (usize, usize) {
+        if plane > 0 {
+            (self.h.subsampling_x as usize, self.h.subsampling_y as usize)
+        } else {
+            (0, 0)
+        }
+    }
+
+    /// Whether a block of `bsize` has a chroma block size the specification
+    /// allows with the frame's subsampling (4:2:2 forbids blocks twice as
+    /// tall as wide, 4:4:0 twice as wide as tall: their chroma would be 4:1).
+    fn chroma_ok(&self, bsize: u8) -> bool {
+        bsize < BLOCK_8X8
+            || SS_SIZE_LOOKUP[bsize as usize][self.h.subsampling_x as usize]
+                [self.h.subsampling_y as usize]
+                != BLOCK_INVALID
     }
 
     pub(crate) fn encode_tiles(&mut self, fd: &mut FrameDec) -> Vec<u8> {
@@ -231,7 +258,7 @@ impl<'a> TileEncoder<'a> {
         let half = num8x8 >> 1;
         let has_rows = (r + half) < h.mi_rows;
         let has_cols = (c + half) < h.mi_cols;
-        let partition = if bsize > self.target_size() {
+        let mut partition = if bsize > self.target_size() {
             PARTITION_SPLIT
         } else if has_rows && has_cols {
             PARTITION_NONE
@@ -242,6 +269,11 @@ impl<'a> TileEncoder<'a> {
         } else {
             PARTITION_SPLIT
         };
+        // At the frame edge, a forced HORZ / VERT whose halves would have a
+        // forbidden chroma size (4:4:0 / 4:2:2) is split instead.
+        if !self.chroma_ok(SUBSIZE_LOOKUP[partition as usize][bsize as usize]) {
+            partition = PARTITION_SPLIT;
+        }
         // The symbol, with the decoder's context.
         let bsl = MI_WIDTH_LOG2[bsize as usize] as u32;
         let boffset = 3 - bsl;
@@ -299,7 +331,7 @@ impl<'a> TileEncoder<'a> {
 
     /// The plane region of the current block: (x, y, w, h, plane block size).
     fn plane_region(&self, fd: &FrameDec, plane: usize) -> (usize, usize, usize, usize, u8) {
-        let (sx, sy) = if plane > 0 { (1, 1) } else { (0, 0) };
+        let (sx, sy) = self.ss(plane);
         let bsize = fd.b.mi_size.max(BLOCK_8X8);
         let psz = SS_SIZE_LOOKUP[bsize as usize][sx][sy];
         let x = ((fd.b.mi_col * 8) >> sx) as usize;
@@ -336,7 +368,7 @@ impl<'a> TileEncoder<'a> {
     /// visible part of the plane region.
     fn sse(&self, fd: &FrameDec, plane: usize) -> f64 {
         let (x, y, w, h, _) = self.plane_region(fd, plane);
-        let (sx, sy) = if plane > 0 { (1, 1) } else { (0, 0) };
+        let (sx, sy) = self.ss(plane);
         let max_x = ((self.h.mi_cols as usize * 8) >> sx).min(x + w);
         let max_y = ((self.h.mi_rows as usize * 8) >> sy).min(y + h);
         let b = &fd.planes[plane];
@@ -366,14 +398,16 @@ impl<'a> TileEncoder<'a> {
         let step = 1usize << tx_sz;
         let (base_x, base_y, pw, ph, _) = self.plane_region(fd, plane);
         let (n4w, n4h) = (pw / 4, ph / 4);
-        let (sx, sy) = if plane > 0 { (1, 1) } else { (0, 0) };
+        let (sx, sy) = self.ss(plane);
         let max_x = (h.mi_cols as usize * 8) >> sx;
         let max_y = (h.mi_rows as usize * 8) >> sy;
         let n = 2 + tx_sz as u32;
         let n0 = 1usize << n;
         let q = fd_q(h, plane);
         let dq_denom = if tx_sz == TX_32X32 { 2.0 } else { 1.0 };
-        let max_coef = 16450;
+        // The largest magnitude a token can carry: category 6 has 14 extra
+        // bits, plus BitDepth - 8 high bits above 8 bits.
+        let max_coef = 67 + (1i32 << (14 + h.bit_depth - 8)) - 1;
         let mut out = Vec::new();
         let mut bits = 0.0;
         let mut block_idx = 0;
@@ -584,7 +618,18 @@ impl<'a> TileEncoder<'a> {
         };
         let x = (fd.b.mi_col * 8) as i32 * 16 + mv[1] * 2;
         let y = (fd.b.mi_row * 8) as i32 * 16 + mv[0] * 2;
-        inter::predict(&refp, x, y, 16, 16, w, h, EIGHTTAP, 8, &mut buf[..w * h]);
+        inter::predict(
+            &refp,
+            x,
+            y,
+            16,
+            16,
+            w,
+            h,
+            EIGHTTAP,
+            self.h.bit_depth,
+            &mut buf[..w * h],
+        );
         let s = &self.src.planes[0];
         let ss = self.src.stride[0];
         let bx = (fd.b.mi_col * 8) as usize;
@@ -981,6 +1026,12 @@ impl<'a> TileEncoder<'a> {
 }
 
 /// (dc, ac) quantiser of a plane.
+/// The quantiser tables' index for the frame's bit depth: 0, 1, 2 for 8,
+/// 10, 12 bits.
+fn bd_index(h: &FrameHeader) -> usize {
+    ((h.bit_depth - 8) >> 1) as usize
+}
+
 fn fd_q(h: &FrameHeader, plane: usize) -> (i32, i32) {
     let q = h.base_q_idx;
     let (dcd, acd) = if plane == 0 {
@@ -989,8 +1040,8 @@ fn fd_q(h: &FrameHeader, plane: usize) -> (i32, i32) {
         (h.delta_q_uv_dc, h.delta_q_uv_ac)
     };
     (
-        DC_QLOOKUP[0][(q + dcd).clamp(0, 255) as usize],
-        AC_QLOOKUP[0][(q + acd).clamp(0, 255) as usize],
+        DC_QLOOKUP[bd_index(h)][(q + dcd).clamp(0, 255) as usize],
+        AC_QLOOKUP[bd_index(h)][(q + acd).clamp(0, 255) as usize],
     )
 }
 
@@ -1026,7 +1077,11 @@ fn write_tokens(
     let ref_type = fd.b.is_inter as usize;
     let ptype = (plane > 0) as usize;
     let txs = tx_sz as usize;
-    let (sx, sy) = if plane > 0 { (1, 1) } else { (0, 0) };
+    let (sx, sy) = if plane > 0 {
+        (fd.ss_x, fd.ss_y)
+    } else {
+        (0, 0)
+    };
     let max_x4 = ((2 * fd.mi_cols) >> sx) as usize;
     let max_y4 = ((2 * fd.mi_rows) >> sy) as usize;
     let x4 = start_x >> 2;
@@ -1106,6 +1161,14 @@ fn write_tokens(
             if token >= 5 {
                 let [cat, num_extra, base] = EXTRA_BITS[token as usize];
                 let extra = mag - base;
+                if token == DCT_VAL_CAT6 {
+                    // The high bits above 8-bit range, most significant
+                    // first, each with probability 255 (read_coef).
+                    let bd = fd.bit_depth as i32;
+                    for k in 0..bd - 8 {
+                        e.write((extra >> (num_extra + bd - 9 - k)) & 1 != 0, 255);
+                    }
+                }
                 let probs = CAT_PROBS[cat as usize];
                 for k in 0..num_extra {
                     e.write((extra >> (num_extra - 1 - k)) & 1 != 0, probs[k as usize]);

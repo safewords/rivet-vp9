@@ -5,7 +5,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub(crate) mod block;
-mod loopfilter;
+pub(crate) mod loopfilter;
 mod mvpred;
 mod recon;
 

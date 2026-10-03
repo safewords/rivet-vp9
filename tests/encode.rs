@@ -6,19 +6,68 @@ mod common;
 
 use vp9::{ChromaFormat, Config, Decoder, Encoder, Frame};
 
+/// PSNR of plane `plane`, against the peak of the frames' bit depth.
 fn psnr(a: &Frame, b: &Frame, plane: usize) -> f64 {
-    let (x, y) = (a.plane(plane), b.plane(plane));
-    let se: f64 = x
-        .iter()
-        .zip(y)
-        .map(|(&p, &q)| (p as f64 - q as f64).powi(2))
-        .sum();
-    let mse = se / x.len() as f64;
+    let pl = a.planes[plane];
+    let mut se = 0.0;
+    for y in 0..pl.height {
+        for x in 0..pl.width {
+            se += (a.sample(plane, x, y) as f64 - b.sample(plane, x, y) as f64).powi(2);
+        }
+    }
+    let mse = se / (pl.width * pl.height) as f64;
+    let peak = ((1u32 << a.bit_depth) - 1) as f64;
     if mse == 0.0 {
         f64::INFINITY
     } else {
-        10.0 * (255.0f64 * 255.0 / mse).log10()
+        10.0 * (peak * peak / mse).log10()
     }
+}
+
+const FORMATS: [ChromaFormat; 4] = [
+    ChromaFormat::Yuv420,
+    ChromaFormat::Yuv422,
+    ChromaFormat::Yuv440,
+    ChromaFormat::Yuv444,
+];
+
+/// `f` (8-bit 4:2:0) at another bit depth and chroma format: chroma
+/// resampled by nearest neighbour, samples widened with the 2x2 mean so
+/// the extra low bits carry detail.
+fn convert(f: &Frame, bit_depth: u32, chroma: ChromaFormat) -> Frame {
+    let mut g = Frame::new(f.width, f.height, bit_depth, chroma);
+    let (sx, sy) = chroma.shifts();
+    for p in 0..3 {
+        let src = f.planes[p];
+        let dst = g.planes[p];
+        for y in 0..dst.height {
+            for x in 0..dst.width {
+                // Position in the source plane.
+                let (fx, fy) = if p == 0 {
+                    (x, y)
+                } else {
+                    ((x << sx) >> 1, (y << sy) >> 1)
+                };
+                let at = |dx: u32, dy: u32| {
+                    f.sample(
+                        p,
+                        (fx + dx).min(src.width - 1),
+                        (fy + dy).min(src.height - 1),
+                    ) as u32
+                };
+                let sum = at(0, 0) + at(1, 0) + at(0, 1) + at(1, 1);
+                let v = (sum << (bit_depth - 8)) >> 2;
+                g.set_sample(p, x, y, v.min((1 << bit_depth) - 1) as u16);
+            }
+        }
+    }
+    g
+}
+
+/// The profile in a frame's first byte (frame_marker, profile_low_bit,
+/// profile_high_bit).
+fn profile_of(packet: &[u8]) -> u8 {
+    ((packet[0] >> 5) & 1) | (((packet[0] >> 4) & 1) << 1)
 }
 
 /// The 10 frames of vp90-2-03-size-226x226.webm, decoded: natural video.
@@ -56,18 +105,25 @@ fn synthetic(w: u32, h: u32, t: u32) -> Frame {
 /// Encodes `frames`, decodes the packets with a fresh decoder, returns the
 /// decoded frames and the packet sizes.
 fn round_trip(cfg: Config, frames: &[Frame]) -> (Vec<Frame>, Vec<usize>) {
+    let profile = cfg.profile();
     let mut enc = Encoder::new(cfg);
     let mut dec = Decoder::new();
     let mut out = Vec::new();
     let mut sizes = Vec::new();
     for f in frames {
         let pkt = enc.encode(f).unwrap();
+        assert_eq!(profile_of(&pkt), profile);
         sizes.push(pkt.len());
-        out.push(
-            dec.decode(&pkt)
-                .unwrap()
-                .expect("every packet shows a frame"),
+        let d = dec
+            .decode(&pkt)
+            .unwrap()
+            .expect("every packet shows a frame");
+        // The decoded frame is the encoder's reconstruction, byte for byte.
+        assert!(
+            enc.reconstruction() == Some(&d),
+            "decoded frame differs from the encoder's reconstruction"
         );
+        out.push(d);
     }
     (out, sizes)
 }
@@ -218,6 +274,87 @@ fn bad_input_is_refused() {
         enc.encode(&Frame::new(16, 16, 8, ChromaFormat::Yuv444))
             .is_err()
     );
+    let mut cfg = Config::new(16, 16);
+    cfg.bit_depth = 9;
+    assert!(cfg.validate().is_err());
+    let mut cfg = Config::new(16, 16);
+    cfg.color_space = vp9::ColorSpace::Rgb;
+    assert!(cfg.validate().is_err());
+    cfg.chroma = ChromaFormat::Yuv444;
+    assert!(cfg.validate().is_ok());
+}
+
+fn synthetic_fmt(w: u32, h: u32, t: u32, bit_depth: u32, chroma: ChromaFormat) -> Frame {
+    convert(&synthetic(w, h, t), bit_depth, chroma)
+}
+
+#[test]
+fn every_profile_round_trips() {
+    // Profiles 0-3: every bit depth and chroma format, odd sizes (forced
+    // edge partitions, which 4:2:2 and 4:4:0 must split where HORZ / VERT
+    // would give a forbidden chroma block), lossless and lossy.
+    for bd in [8, 10, 12] {
+        for chroma in FORMATS {
+            for (w, h) in [(1, 1), (17, 33), (66, 34), (130, 72)] {
+                for bs in [16, 64] {
+                    let frames: Vec<Frame> =
+                        (0..3).map(|t| synthetic_fmt(w, h, t, bd, chroma)).collect();
+                    let mut cfg = Config::new(w, h);
+                    cfg.bit_depth = bd;
+                    cfg.chroma = chroma;
+                    cfg.block_size = bs;
+                    let what = format!("{bd}-bit {chroma:?} {w}x{h} blocks {bs}");
+                    cfg.quantizer = 0;
+                    let (out, _) = round_trip(cfg.clone(), &frames);
+                    for (a, b) in frames.iter().zip(&out) {
+                        assert_eq!(a.data, b.data, "{what}: lossless mismatch");
+                    }
+                    for q in [40u8, 160] {
+                        cfg.quantizer = q;
+                        let (out, _) = round_trip(cfg.clone(), &frames);
+                        let y = psnr(&frames[2], &out[2], 0);
+                        let min = if q == 40 { 30.0 } else { 20.0 };
+                        assert!(y > min, "{what} q {q}: PSNR {y:.1}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn quality_at_every_profile() {
+    // The natural clip in each format: PSNR per plane at several
+    // quantisers, falling with the quantiser.
+    let src = natural();
+    for bd in [8, 10, 12] {
+        for chroma in FORMATS {
+            let frames: Vec<Frame> = src[..4].iter().map(|f| convert(f, bd, chroma)).collect();
+            let mut last = f64::INFINITY;
+            for q in [32u8, 96, 192] {
+                let mut cfg = Config::new(frames[0].width, frames[0].height);
+                cfg.bit_depth = bd;
+                cfg.chroma = chroma;
+                cfg.quantizer = q;
+                let (out, sizes) = round_trip(cfg, &frames);
+                let mean = |p: usize| {
+                    frames
+                        .iter()
+                        .zip(&out)
+                        .map(|(a, b)| psnr(a, b, p))
+                        .sum::<f64>()
+                        / frames.len() as f64
+                };
+                let (y, u, v) = (mean(0), mean(1), mean(2));
+                eprintln!(
+                    "{bd:2}-bit {chroma:?} q {q:3}: {:6} bytes, PSNR Y {y:.2} U {u:.2} V {v:.2} dB",
+                    sizes.iter().sum::<usize>()
+                );
+                assert!(y < last && y > 24.0, "{bd}-bit {chroma:?} q {q}: {y:.2}");
+                last = y;
+            }
+        }
+    }
 }
 
 #[test]
@@ -231,5 +368,34 @@ fn encoder_reconstruction_is_the_decoders() {
         cfg.loop_filter_level = Some(0);
         cfg.block_size = if q == 80 { 32 } else { 16 };
         round_trip(cfg, &src[..4]);
+    }
+}
+
+#[test]
+fn high_bit_depth_large_coefficients() {
+    // Full-swing checkerboards at the finest quantisers: coefficients past
+    // the 8-bit range of a category-6 token (16450), which need its extra
+    // high bits at 10 and 12 bits.
+    for bd in [10u32, 12] {
+        let mut f = Frame::new(128, 64, bd, ChromaFormat::Yuv444);
+        for p in 0..3 {
+            for y in 0..64 {
+                for x in 0..128 {
+                    let on = ((x / 32) + (y / 32)) % 2 == 0;
+                    f.set_sample(p, x, y, if on { (1u16 << bd) - 1 } else { 0 });
+                }
+            }
+        }
+        for q in [1u8, 4] {
+            let mut cfg = Config::new(128, 64);
+            cfg.bit_depth = bd;
+            cfg.chroma = ChromaFormat::Yuv444;
+            cfg.quantizer = q;
+            cfg.block_size = 32;
+            let (out, _) = round_trip(cfg, &[f.clone(), f.clone()]);
+            for o in &out {
+                assert!(psnr(&f, o, 0) > 60.0, "{bd}-bit q {q}");
+            }
+        }
     }
 }

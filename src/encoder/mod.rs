@@ -1,6 +1,8 @@
-//! A VP9 encoder: profile 0 (8-bit 4:2:0), a fixed quantiser.
+//! A VP9 encoder: profiles 0 to 3 (8, 10 and 12 bits; 4:2:0, 4:2:2, 4:4:0
+//! and 4:4:4), a fixed quantiser.
 //!
-//! Every frame is one packet. Key frames code each block with the best of
+//! The profile follows from [`Config::bit_depth`] and [`Config::chroma`]
+//! ([`Config::profile`]). Every frame is one packet. Key frames code each block with the best of
 //! the ten intra modes; inter frames add single-reference prediction from
 //! the previous frame (motion search to quarter-sample precision, NEARESTMV
 //! / NEARMV / ZEROMV / NEWMV) with intra as the alternative. The partition
@@ -16,7 +18,9 @@
 //! The encoder reconstructs with the decoder's own prediction and inverse
 //! transform code, and keeps its reference frames by decoding its own
 //! output with an internal [`Decoder`]: what it predicts from is, by
-//! construction, what a decoder will have.
+//! construction, what a decoder will have, and [`Encoder::reconstruction`]
+//! hands it out. Debug builds also loop filter the encoder's own
+//! reconstruction and compare it with the decoded packet sample by sample.
 
 mod fdct;
 mod tile;
@@ -54,6 +58,10 @@ pub struct Config {
     pub color_space: ColorSpace,
     /// Signal full-range (instead of studio-range) samples.
     pub full_range: bool,
+    /// Bits per sample of the frames to encode: 8, 10 or 12.
+    pub bit_depth: u32,
+    /// Chroma sampling of the frames to encode.
+    pub chroma: ChromaFormat,
 }
 
 impl Config {
@@ -70,7 +78,18 @@ impl Config {
             search_range: 16,
             color_space: ColorSpace::Bt601,
             full_range: false,
+            bit_depth: 8,
+            chroma: ChromaFormat::Yuv420,
         }
+    }
+
+    /// The VP9 profile the settings need: 0 for 8-bit 4:2:0, 1 for 8-bit
+    /// 4:2:2 / 4:4:0 / 4:4:4, 2 for 10 / 12-bit 4:2:0, 3 for 10 / 12-bit
+    /// with the other chroma formats.
+    pub fn profile(&self) -> u8 {
+        let high = self.bit_depth > 8;
+        let full = self.chroma != ChromaFormat::Yuv420;
+        (high as u8) << 1 | full as u8
     }
 
     /// Checks the settings; [`Encoder::encode`] refuses to encode with an
@@ -84,8 +103,11 @@ impl Config {
         if ![8, 16, 32, 64].contains(&self.block_size) {
             return Err(Error::invalid("block_size must be 8, 16, 32 or 64"));
         }
-        if self.color_space == ColorSpace::Rgb {
-            return Err(Error::unsupported("sRGB needs profile 1"));
+        if ![8, 10, 12].contains(&self.bit_depth) {
+            return Err(Error::invalid("bit_depth must be 8, 10 or 12"));
+        }
+        if self.color_space == ColorSpace::Rgb && self.chroma != ChromaFormat::Yuv444 {
+            return Err(Error::invalid("sRGB (planes G, B, R) is coded 4:4:4 only"));
         }
         Ok(())
     }
@@ -98,6 +120,8 @@ pub struct Encoder {
     force_key: bool,
     /// Decodes every packet produced: the reference frames.
     dec: Decoder,
+    /// The last frame's reconstruction (the decoded packet).
+    recon: Option<Frame>,
 }
 
 impl Encoder {
@@ -111,6 +135,7 @@ impl Encoder {
             frames: 0,
             force_key: true,
             dec,
+            recon: None,
         }
     }
 
@@ -124,6 +149,13 @@ impl Encoder {
         self.force_key = true;
     }
 
+    /// The reconstruction of the last frame encoded: exactly what a decoder
+    /// outputs for the last packet (the encoder decodes its own packets to
+    /// keep its references). `None` before the first frame.
+    pub fn reconstruction(&self) -> Option<&Frame> {
+        self.recon.as_ref()
+    }
+
     /// Encodes one frame into one packet (a complete VP9 frame).
     pub fn encode(&mut self, frame: &Frame) -> Result<Vec<u8>> {
         self.cfg.validate()?;
@@ -133,10 +165,11 @@ impl Encoder {
                 frame.width, frame.height, self.cfg.width, self.cfg.height
             )));
         }
-        if frame.bit_depth != 8 || frame.chroma != ChromaFormat::Yuv420 {
-            return Err(Error::unsupported(
-                "the encoder writes profile 0 only: 8-bit 4:2:0",
-            ));
+        if frame.bit_depth != self.cfg.bit_depth || frame.chroma != self.cfg.chroma {
+            return Err(Error::invalid(format!(
+                "frame is {}-bit {:?}, the encoder was configured for {}-bit {:?}",
+                frame.bit_depth, frame.chroma, self.cfg.bit_depth, self.cfg.chroma
+            )));
         }
         let interval = self.cfg.keyframe_interval.max(1) as u64;
         let key = self.force_key || self.frames.is_multiple_of(interval);
@@ -168,8 +201,9 @@ impl Encoder {
             ))
         })?;
         // Debug builds check that the encoder reconstructed exactly what the
-        // decoder decodes (without a loop filter the two are comparable).
-        if let (Some(planes), Some(out)) = (recon, out) {
+        // decoder decodes: its own prediction and residual, loop filtered
+        // with the decoder's filter, against the decoded packet.
+        if let (Some(planes), Some(out)) = (recon, &out) {
             for (p, buf) in planes.iter().enumerate() {
                 let pl = out.planes[p];
                 for y in 0..pl.height {
@@ -184,14 +218,15 @@ impl Encoder {
                 }
             }
         }
+        self.recon = out;
         self.frames += 1;
         self.force_key = false;
         Ok(packet)
     }
 
     /// Codes the tiles of a frame with `probs`; returns the tile data, the
-    /// coefficient statistics and (debug builds, no loop filter, `keep`) the
-    /// reconstruction.
+    /// coefficient statistics and (debug builds, a replaying pass) the
+    /// loop-filtered reconstruction.
     fn encode_pass(
         &self,
         h: &FrameHeader,
@@ -213,8 +248,18 @@ impl Encoder {
         let mut te = tile::TileEncoder::new(&self.cfg, h, src, last.as_deref());
         te.replay = replay.map(|v| (v, 0));
         let t = te.encode_tiles(&mut fd);
-        let recon = if keep && cfg!(debug_assertions) && self.loop_filter_level() == 0 {
-            Some(fd.finish().0)
+        let recon = if keep && cfg!(debug_assertions) {
+            let (mut planes, mi) = fd.finish();
+            let lf = crate::header::LoopFilter {
+                level: self.loop_filter_level(),
+                sharpness: 0,
+                delta_enabled: false,
+                ..Default::default()
+            };
+            if lf.level != 0 {
+                crate::decoder::loopfilter::filter_frame(h, &lf, &seg, &mi, &mut planes);
+            }
+            Some(planes)
         } else {
             None
         };
@@ -250,17 +295,18 @@ impl Encoder {
             min_log2 += 1;
         }
         let lossless = self.cfg.quantizer == 0;
+        let (ss_x, ss_y) = self.cfg.chroma.shifts();
         FrameHeader {
-            profile: 0,
+            profile: self.cfg.profile(),
             frame_type: if key { KEY_FRAME } else { 1 },
             last_frame_type: KEY_FRAME,
             show_frame: true,
             error_resilient_mode: !key,
-            bit_depth: 8,
+            bit_depth: self.cfg.bit_depth,
             color_space: self.cfg.color_space,
-            color_range: self.cfg.full_range,
-            subsampling_x: 1,
-            subsampling_y: 1,
+            color_range: self.cfg.full_range || self.cfg.color_space == ColorSpace::Rgb,
+            subsampling_x: ss_x,
+            subsampling_y: ss_y,
             refresh_frame_flags: if key { 0xff } else { 0x01 },
             ref_frame_idx: [0, 1, 2],
             width: w,
@@ -294,8 +340,11 @@ impl Encoder {
         }
         let key = h.frame_type == KEY_FRAME;
         w.f(2, 2); // frame_marker
-        w.f(1, 0); // profile_low_bit
-        w.f(1, 0); // profile_high_bit
+        w.f(1, h.profile as u32 & 1); // profile_low_bit
+        w.f(1, h.profile as u32 >> 1); // profile_high_bit
+        if h.profile == 3 {
+            w.f(1, 0); // reserved_zero
+        }
         w.f(1, 0); // show_existing_frame
         w.f(1, h.frame_type as u32);
         w.f(1, 1); // show_frame
@@ -304,9 +353,21 @@ impl Encoder {
             w.f(8, 0x49);
             w.f(8, 0x83);
             w.f(8, 0x42);
-            // color_config(), profile 0
+            // color_config()
+            if h.profile >= 2 {
+                w.f(1, (h.bit_depth == 12) as u32); // ten_or_twelve_bit
+            }
             w.f(3, h.color_space.bits());
-            w.f(1, h.color_range as u32);
+            if h.color_space != ColorSpace::Rgb {
+                w.f(1, h.color_range as u32);
+                if h.profile == 1 || h.profile == 3 {
+                    w.f(1, h.subsampling_x);
+                    w.f(1, h.subsampling_y);
+                    w.f(1, 0); // reserved_zero
+                }
+            } else if h.profile == 1 || h.profile == 3 {
+                w.f(1, 0); // reserved_zero
+            }
             w.f(16, h.width - 1);
             w.f(16, h.height - 1);
             w.f(1, 0); // render_and_frame_size_different
@@ -359,7 +420,7 @@ struct Pass {
     tiles: Vec<u8>,
     stats: Box<tile::CoefStats>,
     decisions: Vec<tile::Choice>,
-    /// Debug builds without a loop filter: the reconstruction.
+    /// Debug builds, second pass: the reconstruction, loop filtered.
     recon: Option<[crate::decoder::PlaneBuf; 3]>,
 }
 
