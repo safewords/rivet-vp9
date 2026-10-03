@@ -509,3 +509,81 @@ fn rate_control_long_clips() {
         }
     }
 }
+
+/// Bjøntegaard delta rate: the average bitrate difference (%) of `b`
+/// against `a` at equal PSNR, each a list of (bytes, PSNR) points;
+/// piecewise-linear log-rate over the PSNR range both cover.
+fn bd_rate(a: &[(f64, f64)], b: &[(f64, f64)]) -> f64 {
+    let curve = |v: &[(f64, f64)]| {
+        let mut c: Vec<(f64, f64)> = v.iter().map(|&(r, p)| (p, r.ln())).collect();
+        c.sort_by(|x, y| x.0.total_cmp(&y.0));
+        c
+    };
+    let (ca, cb) = (curve(a), curve(b));
+    let lo = ca[0].0.max(cb[0].0);
+    let hi = ca[ca.len() - 1].0.min(cb[cb.len() - 1].0);
+    let at = |c: &[(f64, f64)], p: f64| {
+        let i = c.windows(2).position(|w| p <= w[1].0).unwrap_or(c.len() - 2);
+        let (p0, r0) = c[i];
+        let (p1, r1) = c[i + 1];
+        r0 + (r1 - r0) * (p - p0) / (p1 - p0)
+    };
+    let n = 200;
+    let mut d = 0.0;
+    for k in 0..=n {
+        let p = lo + (hi - lo) * k as f64 / n as f64;
+        d += at(&cb, p) - at(&ca, p);
+    }
+    ((d / (n + 1) as f64).exp() - 1.0) * 100.0
+}
+
+#[test]
+#[ignore = "measurement: size at equal quality and time per speed"]
+fn tool_gains() {
+    let mut clips = vec![("226x226 natural, 10 frames", natural())];
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/vectors/vp90-2-12-droppable_1.ivf");
+    if p.exists() {
+        let mut d = Decoder::new();
+        let f: Vec<Frame> = common::packets(&p)
+            .iter()
+            .filter_map(|pk| d.decode(pk).unwrap())
+            .take(20)
+            .collect();
+        clips.push(("352x288 droppable_1, 20 frames", f));
+    }
+    for (name, frames) in &clips {
+        let mut base: Option<Vec<(f64, f64)>> = None;
+        for (label, speed, bs) in [
+            ("speed 2, 16x16", 2u8, 16u32),
+            ("speed 2, 32x32", 2, 32),
+            ("speed 1", 1, 16),
+            ("speed 0", 0, 16),
+        ] {
+            let t = std::time::Instant::now();
+            let pts: Vec<(f64, f64)> = [40u8, 80, 120, 160, 200]
+                .iter()
+                .map(|&q| {
+                    let mut cfg = Config::new(frames[0].width, frames[0].height);
+                    cfg.quantizer = q;
+                    cfg.speed = speed;
+                    cfg.block_size = bs;
+                    let (out, sizes) = round_trip(cfg, frames);
+                    let y = frames
+                        .iter()
+                        .zip(&out)
+                        .map(|(a, b)| psnr(a, b, 0))
+                        .sum::<f64>()
+                        / frames.len() as f64;
+                    (sizes.iter().sum::<usize>() as f64, y)
+                })
+                .collect();
+            let fps = 5.0 * frames.len() as f64 / t.elapsed().as_secs_f64();
+            let bd = base.as_ref().map_or(0.0, |b| bd_rate(b, &pts));
+            eprintln!("{name}: {label}: BD-rate {bd:+.1}% vs speed 2 16x16, {fps:.1} frames/s, points {pts:.0?}");
+            if base.is_none() {
+                base = Some(pts);
+            }
+        }
+    }
+}

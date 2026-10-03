@@ -26,3 +26,9 @@ proptest = { version = "1", default-features = false, features = ["std"] }
 
 [features]
 default = []
+
+# Tests keep debug assertions and overflow checks (the encoder compares its
+# reconstruction with the decoder's in debug builds) but are optimised: the
+# encoder's searches are slow unoptimised.
+[profile.test]
+opt-level = 2
