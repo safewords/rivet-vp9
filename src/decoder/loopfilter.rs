@@ -142,8 +142,13 @@ fn superblock(
                 if mi_size < BLOCK_8X8 {
                     TX_4X4
                 } else {
-                    let uv = SS_SIZE_LOOKUP[mi_size as usize][h.subsampling_x as usize]
-                        [h.subsampling_y as usize];
+                    // As get_uv_tx_size (4:2:0's for a legacy stream).
+                    let (ux, uy) = if h.legacy_uv {
+                        (1, 1)
+                    } else {
+                        (h.subsampling_x as usize, h.subsampling_y as usize)
+                    };
+                    let uv = SS_SIZE_LOOKUP[mi_size as usize][ux][uy];
                     m.tx_size.min(MAX_TXSIZE_LOOKUP[uv as usize])
                 }
             } else {

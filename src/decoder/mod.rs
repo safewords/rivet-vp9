@@ -110,6 +110,9 @@ pub struct Decoder {
     last_show_frame: bool,
     frames: u64,
     max_pixels: u64,
+    /// The stream sizes chroma transforms as 4:2:0 although it is not
+    /// (FrameHeader::legacy_uv), as its last intra frame showed.
+    legacy_uv: bool,
 }
 
 impl Default for Decoder {
@@ -137,6 +140,7 @@ impl Decoder {
             last_show_frame: false,
             frames: 0,
             max_pixels: DEFAULT_MAX_PIXELS,
+            legacy_uv: false,
         }
     }
 
@@ -257,24 +261,47 @@ impl Decoder {
             ));
         }
         header::parse_compressed(&data[comp_start..comp_end], &mut h, &mut probs)?;
-        let mut counts = Box::<Counts>::default();
         let seg = self.st.seg.clone();
         let lf = self.st.lf.clone();
-        let mut fd = block::FrameDec::new(
+        let prev_mvs = use_prev_frame_mvs.then_some(&self.prev_mvs[..]);
+        let tiles = &data[comp_end..];
+        // A non-4:2:0 stream may be one of the pre-final profile 1 streams
+        // that size chroma transforms as 4:2:0 (FrameHeader::legacy_uv).
+        // Decided at intra frames: by the specification's rules unless a
+        // tile then fails to parse or leaves nonzero padding (9.2.3) and
+        // the legacy rules parse it cleanly; inter frames follow.
+        let non420 = (h.subsampling_x, h.subsampling_y) != (1, 1);
+        h.legacy_uv = non420 && !h.frame_is_intra && self.legacy_uv;
+        let mut decoded = decode_tile_data(
             &h,
             &seg,
             &mut probs,
-            &mut counts,
             &self.prev_segment_ids,
-            if use_prev_frame_mvs {
-                Some(&self.prev_mvs[..])
-            } else {
-                None
-            },
-            active_refs,
+            prev_mvs,
+            &active_refs,
+            tiles,
         );
-        fd.decode_tiles(&data[comp_end..])?;
-        let (planes, mi) = fd.finish();
+        if h.frame_is_intra {
+            if non420 && !matches!(&decoded, Ok(d) if d.3) {
+                let mut legacy = h.clone();
+                legacy.legacy_uv = true;
+                let retry = decode_tile_data(
+                    &legacy,
+                    &seg,
+                    &mut probs,
+                    &self.prev_segment_ids,
+                    prev_mvs,
+                    &active_refs,
+                    tiles,
+                );
+                if matches!(&retry, Ok(d) if d.3) {
+                    decoded = retry;
+                    h = legacy;
+                }
+            }
+            self.legacy_uv = h.legacy_uv;
+        }
+        let (planes, mi, counts, _) = decoded?;
         let mut planes = planes;
         // Loop filter (8.8).
         if lf.level != 0 {
@@ -343,6 +370,36 @@ impl Decoder {
             None
         })
     }
+}
+
+/// What decoding a frame's tiles gives: the planes, the mode info, the
+/// symbol counts, and whether every tile's padding was zero.
+type TileData = ([PlaneBuf; 3], Vec<MiInfo>, Box<Counts>, bool);
+
+/// Decodes the tile data of a frame (6.4) with header `h`.
+fn decode_tile_data(
+    h: &FrameHeader,
+    seg: &header::Segmentation,
+    probs: &mut Probs,
+    prev_segment_ids: &[u8],
+    prev_mvs: Option<&[PrevMv]>,
+    refs: &[Option<Arc<RefFrame>>; 3],
+    data: &[u8],
+) -> Result<TileData> {
+    let mut counts = Box::<Counts>::default();
+    let mut fd = block::FrameDec::new(
+        h,
+        seg,
+        probs,
+        &mut counts,
+        prev_segment_ids,
+        prev_mvs,
+        refs.clone(),
+    );
+    fd.decode_tiles(data)?;
+    let padding_ok = fd.padding_ok;
+    let (planes, mi) = fd.finish();
+    Ok((planes, mi, counts, padding_ok))
 }
 
 /// Exposed for the encoder's tests: the header of a frame.

@@ -112,7 +112,7 @@ impl FrameDec<'_> {
             let mv = if plane == 0 || self.b.mi_size >= BLOCK_8X8 {
                 bm[block_idx]
             } else {
-                match (self.ss_x, self.ss_y) {
+                match self.uv_tx_subsampling() {
                     (0, 0) => bm[block_idx],
                     (0, _) => [
                         q2(bm[block_idx][0] + bm[block_idx + 2][0]),

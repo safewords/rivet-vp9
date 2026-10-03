@@ -20,5 +20,6 @@ implementation's code.
 | vp90-2-10-show-existing-frame2.webm | show_existing_frame |
 | vp90-2-15-fuzz-flicker.webm | a corrupt container tail |
 | vp91-2-04-yuv444.webm, vp91-2-04-yuv440.webm | profile 1: 4:4:4, 4:4:0 |
+| vp91-2-04-yv444.webm (245 KB, 1280x720) | a pre-final profile 1 4:4:4 stream that sizes chroma transforms and sub-8x8 chroma motion vectors as 4:2:0; its MD5s are in an older file format (`d.1280x720_00001.yv12` names) but are of the same Y, U, V planes |
 | vp92-2-20-10bit-yuv420.webm | profile 2: 10-bit 4:2:0 |
 | vp93-2-20-12bit-yuv422.webm | profile 3: 12-bit 4:2:2 |

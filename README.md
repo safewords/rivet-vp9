@@ -6,7 +6,7 @@ A **VP9** decoder and encoder in Rust: no C, no system libraries, no build
 script, nothing to install on a build host. Written from the *VP9 Bitstream
 & Decoding Process Specification* (v0.6 / v0.7, Google and Argon Design),
 not translated from any other implementation. The decoder is bit-exact on
-**352 of the 353** public VP9 test vectors it was run on (the numbers are
+**all 353** public VP9 test vectors it was run on (the numbers are
 [below](#how-it-is-checked)); the encoder writes all four profiles (8 to
 12 bits, 4:2:0 to 4:4:4) with a rate-distortion partition and transform
 search and a target bitrate (one or two passes), and its frames decode to
@@ -245,7 +245,7 @@ over the next second.
   downloads the 353 `vp90-2-*`, `vp91-2-*`, `vp92-2-*` and `vp93-2-*`
   streams (about 34 MB; the film clips `bbb_`, `sintel_`, `tos_`, 1.8 GB and
   without MD5s, are left out) and `tests/vectors.rs` decodes each and
-  compares every shown frame. **352 of 353 pass**, every frame bit-exact:
+  compares every shown frame. **All 353 pass**, every frame bit-exact:
 
   | group | what it exercises | pass |
   |---|---|---|
@@ -257,17 +257,18 @@ over the next second.
   | vp90-2-09, 11, 12, 15, 19 | aq, loop filter deltas, subpixel, odd sizes, droppable frames, segmentation keys, a fuzzed file, skip | 15 / 15 |
   | vp90-2-10, 16, 17 | show-existing-frame, **intra-only frames** | 4 / 4 |
   | vp90-2-20, 22 | superframes (big indexes, hidden frames), spatial SVC | 6 / 6 |
-  | vp91-2-04 | profile 1: 4:2:2, 4:4:0, 4:4:4 | 3 / 4 |
+  | vp91-2-04 | profile 1: 4:2:2, 4:4:0, 4:4:4, and a pre-final 4:4:4 stream | 4 / 4 |
   | vp92-2-20, vp93-2-20 | profiles 2 and 3: 10 / 12-bit, 4:2:0 to 4:4:4 | 8 / 8 |
 
-  The one failure is `vp91-2-04-yv444.webm`: its MD5 file is in an older
-  format than every other vector's and its key frame does not parse to the
-  end of its tile data here while its inter frames do — consistent with a
-  stream from before the profile 1 syntax was final; `vp91-2-04-yuv444.webm`
-  passes. **Intra-only frames**: `vp90-2-16-intra-only.webm` passes, and
-  the first frame (a key frame) of 352 of the 353 vectors is bit-exact.
-  Fourteen small vectors are committed in [`tests/data`](tests/data/README.md)
-  so `cargo test` checks real streams without the download.
+  `vp91-2-04-yv444.webm` is a stream from before the profile 1 syntax was
+  final (its MD5 file is in an older format too): it sizes chroma
+  transforms, and the chroma motion vectors of blocks below 8x8, as if its
+  4:4:4 chroma were 4:2:0 — see the [specification
+  notes](#specification-notes) for how it is recognised.
+  **Intra-only frames**: `vp90-2-16-intra-only.webm` passes, and the first
+  frame (a key frame) of every vector is bit-exact. Fifteen small vectors
+  are committed in [`tests/data`](tests/data/README.md) so `cargo test`
+  checks real streams without the download.
 - **The encoder** (`tests/encode.rs`), with this crate's decoder as the
   only oracle: every packet decodes, with a fresh decoder, to exactly
   `Encoder::reconstruction()`; at every bit depth (8, 10, 12) and chroma
@@ -375,6 +376,18 @@ settled by the test vectors:
   matches every vector.
 - **Several shown frames in one superframe** (Annex B allows it): the
   vectors expect the last one per packet (`vp90-2-22-svc_1280x720_3.ivf`).
+- **Pre-final profile 1 streams** (`vp91-2-04-yv444.webm`): decoded by the
+  specification's rules, its key frame leaves 170 000 bits of its tile data
+  unread and every frame is wrong. With get_uv_tx_size (and the loop
+  filter's chroma transform size) taken from the 4:2:0 chroma block size,
+  every frame parses to the end of its data, and with the chroma motion
+  vector of a block below 8x8 the average of its four (4:2:0's rule) every
+  frame matches its MD5. The decoder decides which rules a non-4:2:0 stream
+  follows at each intra frame: the specification's, unless a tile then
+  fails to parse or ends with nonzero padding — which 9.2.3 forbids — and
+  the older rules parse it with zero padding; inter frames follow the last
+  intra frame's choice. Every other vector decodes by the specification's
+  rules on the first try.
 - **Inferred values are counted** (9.3): a `partition` forced to SPLIT at
   the frame edge, and the implied `mv_hp` / `mv_class0_hp` of 1, are
   counted for adaptation like decoded ones.

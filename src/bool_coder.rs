@@ -78,6 +78,15 @@ impl<'a> BoolDecoder<'a> {
         bit
     }
 
+    /// Whether the bits not yet read — the padding exit_bool reads (9.2.3)
+    /// — are all zero, as bitstream conformance requires. A tile decoded
+    /// with the wrong syntax leaves coded data unread.
+    pub(crate) fn padding_is_zero(&self) -> bool {
+        // The top byte of `value` is BoolValue, already read; below it,
+        // stream bits not yet read.
+        self.value & ((1u64 << 56) - 1) == 0 && self.data[self.pos..].iter().all(|&b| b == 0)
+    }
+
     /// read_literal( n ) (9.2.4).
     pub(crate) fn literal(&mut self, n: u32) -> u32 {
         let mut x = 0;
@@ -275,6 +284,29 @@ impl BoolEncoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn padding_check() {
+        // What the encoder writes ends in zero padding; data left unread
+        // is not padding.
+        let mut e = BoolEncoder::new();
+        for i in 0..200u32 {
+            e.write(i % 3 == 0, (i * 37 % 255 + 1) as u8);
+        }
+        let mut data = e.finish();
+        let read = |data: &[u8]| {
+            let mut d = BoolDecoder::new(data).unwrap();
+            for i in 0..200u32 {
+                assert_eq!(d.read((i * 37 % 255 + 1) as u8), i % 3 == 0);
+            }
+            d.padding_is_zero()
+        };
+        assert!(read(&data));
+        data.extend_from_slice(&[0, 0, 0]);
+        assert!(read(&data));
+        data.push(0x40);
+        assert!(!read(&data));
+    }
 
     /// The decoder exactly as section 9.2 writes it, bit by bit.
     struct SpecDecoder<'a> {

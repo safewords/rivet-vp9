@@ -107,6 +107,8 @@ pub(crate) struct FrameDec<'a> {
     pub eob_total: u32,
     pub coefs: Vec<i32>,
     pub token_cache: Vec<u8>,
+    /// Whether every tile decoded so far ended with zero padding (9.2.3).
+    pub padding_ok: bool,
 }
 
 /// Probability of node `node` of the token tree (pareto, 9.3.2).
@@ -173,6 +175,7 @@ impl<'a> FrameDec<'a> {
             eob_total: 0,
             coefs: vec![0; 1024],
             token_cache: vec![0; 1024],
+            padding_ok: true,
         }
     }
 
@@ -220,6 +223,7 @@ impl<'a> FrameDec<'a> {
                 self.mi_col_end = tile_offset(tile_col + 1, self.mi_cols, self.h.tile_cols_log2);
                 let mut d = BoolDecoder::new(tile)?;
                 self.decode_tile(&mut d)?;
+                self.padding_ok &= d.padding_is_zero();
             }
         }
         Ok(())
@@ -1180,8 +1184,20 @@ impl<'a> FrameDec<'a> {
         if self.b.mi_size < BLOCK_8X8 {
             return TX_4X4;
         }
-        let uv = SS_SIZE_LOOKUP[self.b.mi_size as usize][self.ss_x as usize][self.ss_y as usize];
+        let (sx, sy) = self.uv_tx_subsampling();
+        let uv = SS_SIZE_LOOKUP[self.b.mi_size as usize][sx][sy];
         self.b.tx_size.min(MAX_TXSIZE_LOOKUP[uv as usize])
+    }
+
+    /// The subsampling get_uv_tx_size and the chroma motion vectors of
+    /// blocks below 8x8 use: the frame's, or 4:2:0's for a pre-final
+    /// profile 1 stream (`FrameHeader::legacy_uv`).
+    pub(crate) fn uv_tx_subsampling(&self) -> (usize, usize) {
+        if self.h.legacy_uv {
+            (1, 1)
+        } else {
+            (self.ss_x as usize, self.ss_y as usize)
+        }
     }
 
     /// The TxType of get_scan (6.4.25).

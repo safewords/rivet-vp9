@@ -137,6 +137,12 @@ pub(crate) struct FrameHeader {
     pub reference_mode: u8,
     pub comp_fixed_ref: i8,
     pub comp_var_ref: [i8; 2],
+    /// Not in the bitstream: the stream is one of the pre-final profile 1
+    /// streams (vp91-2-04-yv444.webm) that take the chroma transform size
+    /// (get_uv_tx_size, and the loop filter's) and the chroma motion
+    /// vectors of blocks below 8x8 as if the chroma were 4:2:0. The decoder
+    /// detects it at intra frames (see `Decoder`).
+    pub legacy_uv: bool,
 }
 
 impl FrameHeader {
