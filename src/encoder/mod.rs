@@ -21,9 +21,30 @@
 //! construction, what a decoder will have, and [`Encoder::reconstruction`]
 //! hands it out. Debug builds also loop filter the encoder's own
 //! reconstruction and compare it with the decoded packet sample by sample.
+//!
+//! # Rate control
+//!
+//! Without a [`Config::target_bitrate`] every frame is coded at
+//! [`Config::quantizer`]. With one, each frame gets a budget and is coded at
+//! the quantiser a model of its size predicts (`bits = c * qstep^-s`, per
+//! frame type, refined from every frame coded), then coded again — up to
+//! [`Config::max_recodes`] times — while it misses the budget by more than
+//! 12%; the attempt nearest the budget is sent.
+//!
+//! - **One pass**: a frame's budget is the bitrate's share per frame (a key
+//!   frame [`KEY_BOOST`] times that), less the overspend so far spread over
+//!   the next second or the frames before the next key frame.
+//! - **Two passes**: a [`FirstPass`] codes the clip at one quantiser; with
+//!   its statistics in [`Config::two_pass`], what is left of the clip's
+//!   budget is divided among the frames left by weight — the first-pass
+//!   size to the power 0.8, key frames times [`KEY_BOOST`] — and each
+//!   frame's search starts from its own first-pass complexity.
 
 mod fdct;
+mod rc;
 mod tile;
+
+pub use rc::{FirstPass, FirstPassStats, KEY_BOOST};
 
 use std::sync::Arc;
 
@@ -44,8 +65,26 @@ pub struct Config {
     /// Height in pixels (1 to 65536).
     pub height: u32,
     /// The quantiser index `base_q_idx`, 0 to 255: lower is better quality.
-    /// 0 codes losslessly.
+    /// 0 codes losslessly. With a [`Config::target_bitrate`], the
+    /// quantiser the first frame is tried at.
     pub quantizer: u8,
+    /// Rate control: a target in bits per second (at
+    /// [`Config::frame_rate`]) instead of the fixed [`Config::quantizer`].
+    /// See [Rate control](self#rate-control).
+    pub target_bitrate: Option<u64>,
+    /// Frames per second, which turns the bitrate into bits per frame.
+    pub frame_rate: f64,
+    /// The quantiser range rate control may use (1 to 255; never
+    /// lossless).
+    pub min_quantizer: u8,
+    /// See [`Config::min_quantizer`].
+    pub max_quantizer: u8,
+    /// How many times rate control may code a frame again at another
+    /// quantiser when it misses its budget by more than 12%.
+    pub max_recodes: u32,
+    /// Two-pass rate control: the statistics of a [`FirstPass`] over the
+    /// same frames.
+    pub two_pass: Option<FirstPassStats>,
     /// A key frame every this many frames; 1 makes every frame a key frame.
     pub keyframe_interval: u32,
     /// Loop filter level 0 to 63; `None` derives it from the quantiser.
@@ -72,6 +111,12 @@ impl Config {
             width,
             height,
             quantizer: 64,
+            target_bitrate: None,
+            frame_rate: 30.0,
+            min_quantizer: 1,
+            max_quantizer: 255,
+            max_recodes: 2,
+            two_pass: None,
             keyframe_interval: 60,
             loop_filter_level: None,
             block_size: 16,
@@ -103,6 +148,7 @@ impl Config {
         if ![8, 16, 32, 64].contains(&self.block_size) {
             return Err(Error::invalid("block_size must be 8, 16, 32 or 64"));
         }
+        rc::validate(self)?;
         if ![8, 10, 12].contains(&self.bit_depth) {
             return Err(Error::invalid("bit_depth must be 8, 10 or 12"));
         }
@@ -122,6 +168,18 @@ pub struct Encoder {
     dec: Decoder,
     /// The last frame's reconstruction (the decoded packet).
     recon: Option<Frame>,
+    /// Whether the last frame was a key frame, and its quantiser.
+    last_was_key: bool,
+    last_q: u8,
+    rc: rc::RateCtl,
+}
+
+/// A frame coded at one quantiser, not yet sent.
+struct Coded {
+    packet: Vec<u8>,
+    /// Debug builds: the encoder's reconstruction, loop filtered.
+    recon: Option<[crate::decoder::PlaneBuf; 3]>,
+    q: u8,
 }
 
 impl Encoder {
@@ -131,11 +189,14 @@ impl Encoder {
         let mut dec = Decoder::new();
         dec.set_max_pixels(cfg.width as u64 * cfg.height as u64);
         Encoder {
-            cfg,
             frames: 0,
             force_key: true,
+            rc: rc::RateCtl::new(&cfg),
             dec,
             recon: None,
+            last_was_key: false,
+            last_q: 0,
+            cfg,
         }
     }
 
@@ -156,6 +217,16 @@ impl Encoder {
         self.recon.as_ref()
     }
 
+    /// The quantiser index (`base_q_idx`) the last frame was coded with.
+    pub fn last_quantizer(&self) -> u8 {
+        self.last_q
+    }
+
+    /// Whether the last frame was coded as a key frame.
+    pub fn last_was_keyframe(&self) -> bool {
+        self.last_was_key
+    }
+
     /// Encodes one frame into one packet (a complete VP9 frame).
     pub fn encode(&mut self, frame: &Frame) -> Result<Vec<u8>> {
         self.cfg.validate()?;
@@ -173,27 +244,15 @@ impl Encoder {
         }
         let interval = self.cfg.keyframe_interval.max(1) as u64;
         let key = self.force_key || self.frames.is_multiple_of(interval);
-        let h = self.header(key);
         let last: Option<Arc<RefFrame>> = if key { None } else { self.dec.ref_slot(0) };
         let key = key || last.is_none();
-        let h = if key { self.header(true) } else { h };
-        let src = tile::Source::new(frame, &h);
-        // A first pass with the default probabilities measures the
-        // coefficient statistics; the coefficient probabilities that pay
-        // for their own update are sent, and the frame coded again with them.
-        let defaults = Probs::default();
-        // The second pass replays the first's block decisions: they do not
-        // depend on the probabilities.
-        let first = self.encode_pass(&h, &src, last.clone(), &defaults, None);
-        let probs = updated_coef_probs(&defaults, &first.stats, h.tx_mode);
-        let second = self.encode_pass(&h, &src, last, &probs, Some(first.decisions));
-        let (tiles, recon) = (second.tiles, second.recon);
-        let comp = compressed_header(&h, &defaults, &probs);
-        let mut w = BitWriter::default();
-        self.uncompressed_header(&mut w, &h, comp.len())?;
-        let mut packet = w.finish();
-        packet.extend_from_slice(&comp);
-        packet.extend_from_slice(&tiles);
+        let src = tile::Source::new(frame, &self.header(key, 0));
+        let coded = if self.cfg.target_bitrate.is_some() {
+            self.rate_controlled(&src, key, last, interval)?
+        } else {
+            self.code_frame(&src, key, last, self.cfg.quantizer)?
+        };
+        let Coded { packet, recon, q } = coded;
         // Keep the references a decoder will have.
         let out = self.dec.decode(&packet).map_err(|e| {
             Error::invalid(format!(
@@ -219,9 +278,85 @@ impl Encoder {
             }
         }
         self.recon = out;
+        self.last_was_key = key;
+        self.last_q = q;
         self.frames += 1;
         self.force_key = false;
         Ok(packet)
+    }
+
+    /// Codes the frame at the quantiser rate control picks for its budget,
+    /// recoding while it misses; the attempt nearest the budget is sent.
+    fn rate_controlled(
+        &mut self,
+        src: &tile::Source,
+        key: bool,
+        last: Option<Arc<RefFrame>>,
+        interval: u64,
+    ) -> Result<Coded> {
+        let to_key = interval - self.frames % interval;
+        let target = self.rc.budget(&self.cfg, key, to_key);
+        let mut q = self.rc.first_q(&self.cfg, key, target);
+        // With nothing known about the content, the first frame may take
+        // a few more attempts.
+        let extra = if self.frames == 0 && self.cfg.two_pass.is_none() {
+            3
+        } else {
+            0
+        };
+        let max_tries = 1 + self.cfg.max_recodes as usize + extra;
+        let mut tries = Vec::new();
+        let mut best: Option<Coded> = None;
+        let miss = |bits: f64| (bits.max(1.0) / target.max(1.0)).ln().abs();
+        loop {
+            let c = self.code_frame(src, key, last.clone(), q)?;
+            let bits = c.packet.len() as f64 * 8.0;
+            tries.push(rc::Attempt { q, bits });
+            if best
+                .as_ref()
+                .is_none_or(|b| miss(bits) < miss(b.packet.len() as f64 * 8.0))
+            {
+                best = Some(c);
+            }
+            match self.rc.next_q(&self.cfg, key, target, &tries, max_tries) {
+                Some(n) => q = n,
+                None => break,
+            }
+        }
+        let best = best.expect("one attempt at least");
+        self.rc.commit(target, best.packet.len() as f64 * 8.0);
+        Ok(best)
+    }
+
+    /// Codes the frame at quantiser `q`: the packet, nothing committed.
+    fn code_frame(
+        &self,
+        src: &tile::Source,
+        key: bool,
+        last: Option<Arc<RefFrame>>,
+        q: u8,
+    ) -> Result<Coded> {
+        let h = self.header(key, q);
+        // A first pass with the default probabilities measures the
+        // coefficient statistics; the coefficient probabilities that pay
+        // for their own update are sent, and the frame coded again with them.
+        let defaults = Probs::default();
+        // The second pass replays the first's block decisions: they do not
+        // depend on the probabilities.
+        let first = self.encode_pass(&h, src, last.clone(), &defaults, None);
+        let probs = updated_coef_probs(&defaults, &first.stats, h.tx_mode);
+        let second = self.encode_pass(&h, src, last, &probs, Some(first.decisions));
+        let comp = compressed_header(&h, &defaults, &probs);
+        let mut w = BitWriter::default();
+        self.uncompressed_header(&mut w, &h, comp.len())?;
+        let mut packet = w.finish();
+        packet.extend_from_slice(&comp);
+        packet.extend_from_slice(&second.tiles);
+        Ok(Coded {
+            packet,
+            recon: second.recon,
+            q,
+        })
     }
 
     /// Codes the tiles of a frame with `probs`; returns the tile data, the
@@ -251,7 +386,7 @@ impl Encoder {
         let recon = if keep && cfg!(debug_assertions) {
             let (mut planes, mi) = fd.finish();
             let lf = crate::header::LoopFilter {
-                level: self.loop_filter_level(),
+                level: self.loop_filter_level(h.base_q_idx as u8),
                 sharpness: 0,
                 delta_enabled: false,
                 ..Default::default()
@@ -271,11 +406,11 @@ impl Encoder {
         }
     }
 
-    fn loop_filter_level(&self) -> u8 {
+    fn loop_filter_level(&self, q: u8) -> u8 {
         if let Some(l) = self.cfg.loop_filter_level {
             return l.min(63);
         }
-        let q = self.cfg.quantizer as u32;
+        let q = q as u32;
         if q == 0 {
             0
         } else {
@@ -284,7 +419,7 @@ impl Encoder {
     }
 
     /// The header both the writer and the reconstruction use.
-    fn header(&self, key: bool) -> FrameHeader {
+    fn header(&self, key: bool, q: u8) -> FrameHeader {
         let (w, ht) = (self.cfg.width, self.cfg.height);
         let mi_cols = w.div_ceil(8);
         let mi_rows = ht.div_ceil(8);
@@ -294,7 +429,7 @@ impl Encoder {
         while (MAX_TILE_WIDTH_B64 << min_log2) < sb64_cols {
             min_log2 += 1;
         }
-        let lossless = self.cfg.quantizer == 0;
+        let lossless = q == 0;
         let (ss_x, ss_y) = self.cfg.chroma.shifts();
         FrameHeader {
             profile: self.cfg.profile(),
@@ -315,7 +450,7 @@ impl Encoder {
             render_height: ht,
             interpolation_filter: EIGHTTAP,
             frame_parallel_decoding_mode: true,
-            base_q_idx: self.cfg.quantizer as i32,
+            base_q_idx: q as i32,
             lossless,
             tile_cols_log2: min_log2,
             frame_is_intra: key,
@@ -391,7 +526,7 @@ impl Encoder {
         }
         w.f(2, 0); // frame_context_idx
         // loop_filter_params()
-        w.f(6, self.loop_filter_level() as u32);
+        w.f(6, self.loop_filter_level(h.base_q_idx as u8) as u32);
         w.f(3, 0); // sharpness
         w.f(1, 0); // loop_filter_delta_enabled
         // quantization_params()

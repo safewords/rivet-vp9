@@ -399,3 +399,113 @@ fn high_bit_depth_large_coefficients() {
         }
     }
 }
+
+/// Encodes `frames` at `bitrate` (30 frames/s), one or two passes; returns
+/// the achieved bitrate and the mean luma PSNR.
+fn rate_controlled(frames: &[Frame], bitrate: u64, two_pass: bool) -> (f64, f64, Vec<usize>) {
+    let mut cfg = Config::new(frames[0].width, frames[0].height);
+    cfg.bit_depth = frames[0].bit_depth;
+    cfg.chroma = frames[0].chroma;
+    cfg.target_bitrate = Some(bitrate);
+    cfg.frame_rate = 30.0;
+    if two_pass {
+        let mut fp = vp9::encoder::FirstPass::new(cfg.clone());
+        for f in frames {
+            fp.add(f).unwrap();
+        }
+        cfg.two_pass = Some(fp.finish());
+    }
+    let (out, sizes) = round_trip(cfg, frames);
+    let bits = sizes.iter().sum::<usize>() as f64 * 8.0;
+    let rate = bits * 30.0 / frames.len() as f64;
+    let y = frames
+        .iter()
+        .zip(&out)
+        .map(|(a, b)| psnr(a, b, 0))
+        .sum::<f64>()
+        / frames.len() as f64;
+    (rate, y, sizes)
+}
+
+/// The natural clip played forwards then backwards, `n` frames.
+fn ping_pong(src: &[Frame], n: usize) -> Vec<Frame> {
+    let period = 2 * src.len() - 2;
+    (0..n)
+        .map(|i| {
+            let k = i % period;
+            src[if k < src.len() { k } else { period - k }].clone()
+        })
+        .collect()
+}
+
+#[test]
+fn rate_control_meets_the_target() {
+    // 40 frames of natural video (the clip forwards and back), 226x226.
+    let frames = ping_pong(&natural(), 40);
+    for kbps in [300u64, 1200] {
+        for two in [false, true] {
+            let (rate, y, sizes) = rate_controlled(&frames, kbps * 1000, two);
+            let err = rate / (kbps * 1000) as f64 - 1.0;
+            eprintln!(
+                "{kbps} kb/s {}: {:.1} kb/s ({:+.1}%), PSNR Y {y:.2}, key frame {} bytes",
+                if two { "two-pass" } else { "one-pass" },
+                rate / 1000.0,
+                err * 100.0,
+                sizes[0]
+            );
+            let tol = if two { 0.05 } else { 0.15 };
+            assert!(err.abs() < tol, "{kbps} kb/s two-pass {two}: {rate:.0}");
+        }
+    }
+    // More bits, better pictures.
+    let (_, lo, _) = rate_controlled(&frames[..12], 300_000, false);
+    let (_, hi, _) = rate_controlled(&frames[..12], 1_200_000, false);
+    assert!(hi > lo + 3.0, "{lo:.2} -> {hi:.2}");
+}
+
+#[test]
+fn rate_control_at_high_bit_depth() {
+    let frames: Vec<Frame> = ping_pong(&natural(), 16)
+        .iter()
+        .map(|f| convert(f, 10, ChromaFormat::Yuv444))
+        .collect();
+    let (rate, y, _) = rate_controlled(&frames, 800_000, true);
+    eprintln!("10-bit 4:4:4 at 800 kb/s two-pass: {rate:.0} b/s, PSNR Y {y:.2}");
+    assert!((rate / 800_000.0 - 1.0).abs() < 0.05);
+}
+
+#[test]
+#[ignore = "measurement on downloaded vectors (tools/fetch-vectors.sh)"]
+fn rate_control_long_clips() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
+    for (name, n) in [
+        ("vp90-2-09-aq2.webm", 100),
+        ("vp90-2-12-droppable_1.ivf", 99),
+    ] {
+        let p = dir.join(name);
+        if !p.exists() {
+            eprintln!("{name} not downloaded; skipped");
+            continue;
+        }
+        let mut d = Decoder::new();
+        let frames: Vec<Frame> = common::packets(&p)
+            .iter()
+            .filter_map(|pk| d.decode(pk).unwrap())
+            .take(n)
+            .collect();
+        for kbps in [150u64, 400, 1000] {
+            for two in [false, true] {
+                let (rate, y, _) = rate_controlled(&frames, kbps * 1000, two);
+                eprintln!(
+                    "{name} {}x{} {} frames, {kbps} kb/s {}: {:.1} kb/s ({:+.1}%), PSNR Y {y:.2}",
+                    frames[0].width,
+                    frames[0].height,
+                    frames.len(),
+                    if two { "two-pass" } else { "one-pass" },
+                    rate / 1000.0,
+                    (rate / (kbps * 1000) as f64 - 1.0) * 100.0
+                );
+            }
+        }
+    }
+}
