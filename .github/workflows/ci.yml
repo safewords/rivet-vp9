@@ -17,25 +17,46 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { name: linux x86-64,   os: ubuntu-latest }
-          - { name: linux arm64,    os: ubuntu-24.04-arm }
-          - { name: windows x86-64, os: windows-latest }
-          - { name: macos arm64,    os: macos-latest }
+          # The SIMD kernels are checked bit-exact against the scalar ones on
+          # every host: SSE4.1 and AVX2 on x86-64, NEON on arm64.
+          # VP9_REQUIRE_SIMD makes a runner without them fail the kernel
+          # tests rather than skip them: a skipped kernel test is
+          # indistinguishable from a passing one.
+          - { name: linux x86-64 (AVX2),  os: ubuntu-latest }
+          - { name: linux arm64 (NEON),   os: ubuntu-24.04-arm }
+          - { name: windows x86-64 (AVX2), os: windows-latest }
+          - { name: macos arm64 (NEON),   os: macos-latest }
+          - { name: macos 14 arm64 (NEON), os: macos-14 }
+    env:
+      VP9_REQUIRE_SIMD: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Tests (committed vectors, encoder, units)
+      - name: Tests (committed vectors, encoder, units), SIMD kernels
         run: cargo test --release
+      - name: The same with the scalar kernels, one thread
+        run: cargo test --release
+        env:
+          VP9_FORCE_SCALAR: "1"
+          VP9_TEST_THREADS: "1"
       - name: Property tests and encoder self-check with debug assertions and overflow checks (test profile, optimised)
         run: cargo test --test fuzz --test encode
 
   # The full set of public VP9 test vectors (about 34 MB), downloaded from
   # the WebM project's test-data bucket. Without the download the test
-  # skips; VP9_REQUIRE_VECTORS makes a missing set a failure here.
+  # skips; VP9_REQUIRE_VECTORS makes a missing set a failure here. Every
+  # vector is decoded with the SIMD kernels on all cores, and again with
+  # the scalar kernels on one thread.
   vectors:
-    name: test vectors (353 streams)
-    runs-on: ubuntu-latest
+    name: test vectors (353 streams, ${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: x86-64, os: ubuntu-latest }
+          - { name: arm64, os: ubuntu-24.04-arm }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -45,10 +66,16 @@ jobs:
           path: tests/vectors
           key: vp9-vectors-${{ hashFiles('tools/vectors.txt') }}
       - run: tools/fetch-vectors.sh
-      - name: Decode every vector, compare every frame's MD5
+      - name: Decode every vector, compare every frame's MD5 (SIMD, threads)
         run: cargo test --release --test vectors -- --nocapture
         env:
           VP9_REQUIRE_VECTORS: "1"
+      - name: Decode every vector, compare every frame's MD5 (scalar, one thread)
+        run: cargo test --release --test vectors -- --nocapture
+        env:
+          VP9_REQUIRE_VECTORS: "1"
+          VP9_FORCE_SCALAR: "1"
+          VP9_TEST_THREADS: "1"
 
   msrv:
     name: MSRV (1.99)
@@ -60,16 +87,18 @@ jobs:
       - run: cargo build --release
 
   lint:
-    name: rustfmt, clippy and rustdoc
+    name: rustfmt, clippy (x86-64 and aarch64) and rustdoc
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+          targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --target aarch64-unknown-linux-gnu -- -D warnings
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings

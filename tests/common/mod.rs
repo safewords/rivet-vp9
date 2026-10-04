@@ -124,6 +124,13 @@ pub fn run_vector(path: &Path) -> Outcome {
     let name = path.file_name().unwrap().to_string_lossy().to_string();
     let expected = expected_md5s(path);
     let mut dec = vp9::Decoder::new();
+    // VP9_TEST_THREADS: the decoder's thread count (default: one per core).
+    if let Some(t) = std::env::var("VP9_TEST_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        dec.set_threads(t);
+    }
     let mut frames = 0usize;
     let mut matched = 0usize;
     let mut failure = None;

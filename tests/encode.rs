@@ -601,3 +601,59 @@ fn tool_gains() {
         }
     }
 }
+
+/// The output is the same with any number of threads: the encoder codes
+/// its tile columns in parallel, the decoder decodes them (and the loop
+/// filter its planes) in parallel.
+#[test]
+fn threads_do_not_change_the_output() {
+    // 1024 wide: four tile columns by default.
+    let (w, h) = (1024, 72);
+    for (bd, chroma, speed) in [
+        (8, ChromaFormat::Yuv420, 1),
+        (8, ChromaFormat::Yuv420, 2),
+        (10, ChromaFormat::Yuv444, 2),
+    ] {
+        let frames: Vec<Frame> = (0..3)
+            .map(|t| convert(&synthetic(w, h, t), bd, chroma))
+            .collect();
+        let mut packets: Vec<Vec<Vec<u8>>> = Vec::new();
+        for threads in [1, 4] {
+            let mut cfg = Config::new(w, h);
+            cfg.bit_depth = bd;
+            cfg.chroma = chroma;
+            cfg.speed = speed;
+            cfg.threads = threads;
+            let mut enc = Encoder::new(cfg);
+            packets.push(frames.iter().map(|f| enc.encode(f).unwrap()).collect());
+        }
+        assert_eq!(packets[0], packets[1], "{bd}-bit {chroma:?} speed {speed}");
+        let mut decoded: Vec<Vec<Frame>> = Vec::new();
+        for threads in [1, 3, 8] {
+            let mut d = Decoder::new();
+            d.set_threads(threads);
+            decoded.push(
+                packets[0]
+                    .iter()
+                    .map(|p| d.decode(p).unwrap().unwrap())
+                    .collect(),
+            );
+        }
+        assert!(decoded[0] == decoded[1] && decoded[0] == decoded[2]);
+    }
+}
+
+/// Every tile column count the width allows decodes to the encoder's
+/// reconstruction.
+#[test]
+fn every_tile_column_count_round_trips() {
+    let (w, h) = (1100, 40);
+    let frames: Vec<Frame> = (0..2).map(|t| synthetic(w, h, t)).collect();
+    for log2 in 0..3 {
+        let mut cfg = Config::new(w, h);
+        cfg.tile_cols_log2 = Some(log2);
+        cfg.speed = 2;
+        let (out, _) = round_trip(cfg, &frames);
+        assert!(psnr(&frames[1], &out[1], 0) > 30.0, "{log2}");
+    }
+}
