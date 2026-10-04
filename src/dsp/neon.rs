@@ -463,3 +463,78 @@ pub(crate) fn quantize(d: &[i32], scale: f32, bias: f32, max_coef: i32, out: &mu
         &mut out[len4..len],
     );
 }
+
+/// Two 64-bit lanes, for the inverse transforms above 8 bits. The
+/// multiplies are vmull_s32 (low 32 bits, sign-extended, times the
+/// constant), the scalar lane's arithmetic (itx.rs, `S64`).
+#[derive(Clone, Copy)]
+pub(crate) struct V64x2(int64x2_t);
+
+// SAFETY: NEON is always present; loads and stores go through
+// bounds-checked slices.
+impl Lane for V64x2 {
+    const W: usize = 2;
+    super::itx::lane_sizes!(2);
+    #[inline(always)]
+    fn zero() -> Self {
+        unsafe { V64x2(vdupq_n_s64(0)) }
+    }
+    #[inline(always)]
+    fn add(self, o: Self) -> Self {
+        unsafe { V64x2(vaddq_s64(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn sub(self, o: Self) -> Self {
+        unsafe { V64x2(vsubq_s64(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn mul(self, c: i32) -> Self {
+        unsafe { V64x2(vmull_n_s32(vmovn_s64(self.0), c)) }
+    }
+    #[inline(always)]
+    fn round_shift(self, n: u32) -> Self {
+        unsafe { V64x2(vaddq_s64(self.0, vdupq_n_s64(1 << (n - 1)))).sar(n) }
+    }
+    #[inline(always)]
+    fn sar(self, n: u32) -> Self {
+        unsafe { V64x2(vshlq_s64(self.0, vdupq_n_s64(-(n as i64)))) }
+    }
+    #[inline(always)]
+    fn load(src: &[i32]) -> Self {
+        let s = &src[..2];
+        unsafe { V64x2(vmovl_s32(vld1_s32(s.as_ptr()))) }
+    }
+    #[inline(always)]
+    fn transpose(v: &mut [Self]) {
+        let v = &mut v[..2];
+        unsafe {
+            let (a, b) = (v[0].0, v[1].0);
+            v[0] = V64x2(vtrn1q_s64(a, b));
+            v[1] = V64x2(vtrn2q_s64(a, b));
+        }
+    }
+    #[inline(always)]
+    fn add_to(self, dst: &mut [u16], max: i32) {
+        let d = &mut dst[..2];
+        let mut r = [0i64; 2];
+        unsafe { vst1q_s64(r.as_mut_ptr(), self.0) };
+        for (d, r) in d.iter_mut().zip(r) {
+            let r = r.clamp(-(1 << 16), 1 << 16) as i32;
+            *d = (*d as i32 + r).clamp(0, max) as u16;
+        }
+    }
+}
+
+/// The inverse transform and reconstruction above 8 bits.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn itx64(
+    coefs: &[i32],
+    n: u32,
+    tx_type: u8,
+    lossless: bool,
+    dst: &mut [u16],
+    stride: usize,
+    max: i32,
+) {
+    V64x2::inverse_add(coefs, n, tx_type, lossless, dst, stride, max);
+}

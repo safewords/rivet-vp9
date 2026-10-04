@@ -42,6 +42,20 @@ fn kernel_bench() {
         let v = best(|| f(simd, &mut d));
         row(&format!("idct {n0}x{n0} + add"), s, v);
     }
+    // The same at 10 bits (64-bit lanes).
+    for n in 2..=5u32 {
+        let n0 = 1usize << n;
+        let c: Vec<i32> = (0..n0 * n0)
+            .map(|_| rng.range(-1200, 1200) as i32)
+            .collect();
+        let mut d = vec![512u16; n0 * n0];
+        let f = |l: Level, d: &mut Vec<u16>| {
+            itx::inverse_transform_add(l, black_box(&c), n, 0, false, 9, 10, d, n0)
+        };
+        let s = best(|| f(Level::Scalar, &mut d));
+        let v = best(|| f(simd, &mut d));
+        row(&format!("idct {n0}x{n0} + add, 10-bit"), s, v);
+    }
     // Inter prediction, both passes.
     let plane: Vec<u16> = (0..256 * 256).map(|_| rng.range(0, 255) as u16).collect();
     let r = inter::RefPlane {

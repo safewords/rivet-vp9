@@ -614,7 +614,14 @@ impl Lane for S32 {
 }
 
 /// One 64-bit value: the lane above 8 bits, the specification's arithmetic
-/// on a conforming stream's values (whose products need more than 32 bits).
+/// on a conforming stream's values. There `T` has up to 20 bits (8.7.2:
+/// 8 + BitDepth), so a butterfly's products (20 x 14 bits, two summed)
+/// need up to 35 bits and 32-bit lanes do not suffice; but every value
+/// multiplied is a stored `T` (or, in the 4-point ADST, a sum of three:
+/// 22 bits), well within 32. The multiplication therefore takes the low
+/// 32 bits of its operand, sign-extended, times the constant, to 64 bits:
+/// exactly what the SIMD lanes' 32 x 32 -> 64-bit multiplies compute, and
+/// the specification's product for every conforming stream.
 #[derive(Clone, Copy)]
 pub(crate) struct S64(i64);
 
@@ -634,7 +641,7 @@ impl Lane for S64 {
     }
     #[inline(always)]
     fn mul(self, c: i32) -> Self {
-        S64(self.0.wrapping_mul(c as i64))
+        S64((self.0 as i32 as i64).wrapping_mul(c as i64))
     }
     #[inline(always)]
     fn round_shift(self, n: u32) -> Self {
@@ -706,15 +713,17 @@ pub(crate) fn inverse_transform_add(
     debug_assert!(coefs.len() >= n0 * n0);
     debug_assert!(dst.len() >= (n0 - 1) * stride + n0);
     if bit_depth > 8 {
-        scalar64(
-            coefs,
-            n,
-            tx_type,
-            lossless,
-            dst,
-            stride,
-            (1 << bit_depth) - 1,
-        );
+        let max = (1 << bit_depth) - 1;
+        match level {
+            #[cfg(target_arch = "x86_64")]
+            Level::Avx2 => {
+                // SAFETY: the level says the machine has AVX2.
+                unsafe { super::x86::itx64_avx2(coefs, n, tx_type, lossless, dst, stride, max) }
+            }
+            #[cfg(target_arch = "aarch64")]
+            Level::Neon => super::neon::itx64(coefs, n, tx_type, lossless, dst, stride, max),
+            _ => scalar64(coefs, n, tx_type, lossless, dst, stride, max),
+        }
         return;
     }
     if eob == 1 && tx_type == DCT_DCT && !lossless {
@@ -1362,6 +1371,57 @@ mod tests {
                             n0,
                         );
                         assert_eq!(got, want, "{bd}-bit n={n} type={tx_type}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Above 8 bits: the SIMD kernels equal the scalar one on any input
+    /// (and the specification on conforming input, tested above).
+    #[test]
+    fn high_bit_depth_simd_equals_scalar() {
+        let mut rng = Rng(0x5eed);
+        for bd in [10u32, 12] {
+            let max = (1 << bd) - 1;
+            for n in 2..=5u32 {
+                let n0 = 1usize << n;
+                for tx_type in 0..4u8 {
+                    if n == 5 && tx_type != DCT_DCT {
+                        continue;
+                    }
+                    for iter in 0..200 {
+                        let mag = [(1i64 << (7 + bd)) - 1, i32::MAX as i64, 1 << 20, 300][iter % 4];
+                        let b = block(&mut rng, n, mag);
+                        let lossless = n == 2 && tx_type == DCT_DCT && iter % 5 == 0;
+                        let p = pred(&mut rng, n0, n0 + 3, max);
+                        let mut want = p.clone();
+                        inverse_transform_add(
+                            Level::Scalar,
+                            &b,
+                            n,
+                            tx_type,
+                            lossless,
+                            2,
+                            bd,
+                            &mut want,
+                            n0 + 3,
+                        );
+                        for l in test_levels() {
+                            let mut got = p.clone();
+                            inverse_transform_add(
+                                l,
+                                &b,
+                                n,
+                                tx_type,
+                                lossless,
+                                2,
+                                bd,
+                                &mut got,
+                                n0 + 3,
+                            );
+                            assert_eq!(got, want, "{l:?} {bd}-bit n={n} type={tx_type}");
+                        }
                     }
                 }
             }

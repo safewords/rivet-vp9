@@ -1010,3 +1010,109 @@ pub(crate) unsafe fn lf_avx2(
         buf, stride, x0, y0, vertical, first, n_edges, n_runs, e, bit_depth,
     );
 }
+
+// ---------------------------------------------------------------------
+// Inverse transforms above 8 bits: four 64-bit lanes (AVX2). The
+// multiplies are vpmuldq (low 32 bits of each lane, sign-extended, times
+// the constant), the scalar lane's arithmetic (itx.rs, `S64`); AVX2 has no
+// 64-bit arithmetic shift or min / max, so those are built from the
+// logical shift and compares.
+
+/// Four 64-bit lanes (AVX2).
+#[derive(Clone, Copy)]
+pub(crate) struct V64x4(__m256i);
+
+// SAFETY: reached only from `itx64_avx2`, which runs with AVX2 enabled
+// after the level check; loads and stores go through bounds-checked slices.
+impl Lane for V64x4 {
+    const W: usize = 4;
+    super::itx::lane_sizes!(4);
+    #[inline(always)]
+    fn zero() -> Self {
+        unsafe { V64x4(_mm256_setzero_si256()) }
+    }
+    #[inline(always)]
+    fn add(self, o: Self) -> Self {
+        unsafe { V64x4(_mm256_add_epi64(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn sub(self, o: Self) -> Self {
+        unsafe { V64x4(_mm256_sub_epi64(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn mul(self, c: i32) -> Self {
+        unsafe { V64x4(_mm256_mul_epi32(self.0, _mm256_set1_epi64x(c as i64))) }
+    }
+    #[inline(always)]
+    fn round_shift(self, n: u32) -> Self {
+        unsafe { V64x4(_mm256_add_epi64(self.0, _mm256_set1_epi64x(1 << (n - 1)))).sar(n) }
+    }
+    #[inline(always)]
+    fn sar(self, n: u32) -> Self {
+        unsafe {
+            let neg = _mm256_cmpgt_epi64(_mm256_setzero_si256(), self.0);
+            let l = _mm256_srl_epi64(self.0, _mm_cvtsi32_si128(n as i32));
+            let fill = _mm256_sll_epi64(neg, _mm_cvtsi32_si128(64 - n as i32));
+            V64x4(_mm256_or_si256(
+                l,
+                if n == 0 { _mm256_setzero_si256() } else { fill },
+            ))
+        }
+    }
+    #[inline(always)]
+    fn load(src: &[i32]) -> Self {
+        let s = &src[..4];
+        unsafe {
+            V64x4(_mm256_cvtepi32_epi64(_mm_loadu_si128(
+                s.as_ptr() as *const __m128i
+            )))
+        }
+    }
+    #[inline(always)]
+    fn transpose(v: &mut [Self]) {
+        let v = &mut v[..4];
+        unsafe {
+            let t0 = _mm256_unpacklo_epi64(v[0].0, v[1].0);
+            let t1 = _mm256_unpackhi_epi64(v[0].0, v[1].0);
+            let t2 = _mm256_unpacklo_epi64(v[2].0, v[3].0);
+            let t3 = _mm256_unpackhi_epi64(v[2].0, v[3].0);
+            v[0] = V64x4(_mm256_permute2x128_si256(t0, t2, 0x20));
+            v[1] = V64x4(_mm256_permute2x128_si256(t1, t3, 0x20));
+            v[2] = V64x4(_mm256_permute2x128_si256(t0, t2, 0x31));
+            v[3] = V64x4(_mm256_permute2x128_si256(t1, t3, 0x31));
+        }
+    }
+    #[inline(always)]
+    fn add_to(self, dst: &mut [u16], max: i32) {
+        let d = &mut dst[..4];
+        unsafe {
+            let clamp = |v: __m256i, lo: i64, hi: i64| {
+                let (lo, hi) = (_mm256_set1_epi64x(lo), _mm256_set1_epi64x(hi));
+                let v = _mm256_blendv_epi8(v, lo, _mm256_cmpgt_epi64(lo, v));
+                _mm256_blendv_epi8(v, hi, _mm256_cmpgt_epi64(v, hi))
+            };
+            let r = clamp(self.0, -(1 << 16), 1 << 16);
+            let p = _mm256_cvtepu16_epi64(_mm_loadl_epi64(d.as_ptr() as *const __m128i));
+            let s = clamp(_mm256_add_epi64(p, r), 0, max as i64);
+            // The low 32 bits of each lane, then to 16.
+            let s = _mm256_permutevar8x32_epi32(s, _mm256_setr_epi32(0, 2, 4, 6, 0, 2, 4, 6));
+            let s = _mm256_castsi256_si128(s);
+            _mm_storel_epi64(d.as_mut_ptr() as *mut __m128i, _mm_packus_epi32(s, s));
+        }
+    }
+}
+
+/// The inverse transform and reconstruction above 8 bits, with AVX2.
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn itx64_avx2(
+    coefs: &[i32],
+    n: u32,
+    tx_type: u8,
+    lossless: bool,
+    dst: &mut [u16],
+    stride: usize,
+    max: i32,
+) {
+    V64x4::inverse_add(coefs, n, tx_type, lossless, dst, stride, max);
+}
