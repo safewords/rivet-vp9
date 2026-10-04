@@ -447,13 +447,27 @@ pub(crate) struct V16x8(__m128i);
 // SAFETY: reached only from `lf_sse41`, which runs with SSE4.1 enabled
 // after the level check; loads and stores go through 8-sample slices.
 impl super::lf::V16 for V16x8 {
+    const RUNS: usize = 2;
     #[inline(always)]
     fn splat(v: i16) -> Self {
         unsafe { V16x8(_mm_set1_epi16(v)) }
     }
     #[inline(always)]
-    fn halves(a: i16, b: i16) -> Self {
-        unsafe { V16x8(_mm_unpacklo_epi64(_mm_set1_epi16(a), _mm_set1_epi16(b))) }
+    fn per_run(v: [i16; 4]) -> Self {
+        unsafe {
+            V16x8(_mm_unpacklo_epi64(
+                _mm_set1_epi16(v[0]),
+                _mm_set1_epi16(v[1]),
+            ))
+        }
+    }
+    #[inline(always)]
+    fn load2(a: &[u16], _: &[u16]) -> Self {
+        Self::load(a)
+    }
+    #[inline(always)]
+    fn store2(self, a: &mut [u16], _: &mut [u16]) {
+        self.store(a)
     }
     #[inline(always)]
     fn load(src: &[u16]) -> Self {
@@ -802,5 +816,174 @@ pub(crate) unsafe fn quantize_sse41(
         bias,
         max_coef,
         &mut out[len4..len],
+    );
+}
+
+// ---------------------------------------------------------------------
+// Loop filter: sixteen 16-bit lanes (AVX2). The same operations as
+// `V16x8`'s; the transposes and the unpacks work within 128-bit lanes, so
+// the high lanes carry a second 8 x 8 block (rows 8..16 of a vertical
+// edge).
+
+/// Sixteen 16-bit lanes (AVX2).
+#[derive(Clone, Copy)]
+pub(crate) struct V16x16(__m256i);
+
+// SAFETY: reached only from `lf_avx2`, which runs with AVX2 enabled after
+// the level check; loads and stores go through slices of the lane count.
+impl super::lf::V16 for V16x16 {
+    const RUNS: usize = 4;
+    #[inline(always)]
+    fn splat(v: i16) -> Self {
+        unsafe { V16x16(_mm256_set1_epi16(v)) }
+    }
+    #[inline(always)]
+    fn per_run(v: [i16; 4]) -> Self {
+        unsafe {
+            V16x16(_mm256_set_epi16(
+                v[3], v[3], v[3], v[3], v[2], v[2], v[2], v[2], v[1], v[1], v[1], v[1], v[0], v[0],
+                v[0], v[0],
+            ))
+        }
+    }
+    #[inline(always)]
+    fn load(src: &[u16]) -> Self {
+        let s = &src[..16];
+        unsafe { V16x16(_mm256_loadu_si256(s.as_ptr() as *const __m256i)) }
+    }
+    #[inline(always)]
+    fn store(self, dst: &mut [u16]) {
+        let d = &mut dst[..16];
+        unsafe { _mm256_storeu_si256(d.as_mut_ptr() as *mut __m256i, self.0) }
+    }
+    #[inline(always)]
+    fn load2(a: &[u16], b: &[u16]) -> Self {
+        let (a, b) = (&a[..8], &b[..8]);
+        unsafe {
+            V16x16(_mm256_set_m128i(
+                _mm_loadu_si128(b.as_ptr() as *const __m128i),
+                _mm_loadu_si128(a.as_ptr() as *const __m128i),
+            ))
+        }
+    }
+    #[inline(always)]
+    fn store2(self, a: &mut [u16], b: &mut [u16]) {
+        let (a, b) = (&mut a[..8], &mut b[..8]);
+        unsafe {
+            _mm_storeu_si128(
+                a.as_mut_ptr() as *mut __m128i,
+                _mm256_castsi256_si128(self.0),
+            );
+            _mm_storeu_si128(
+                b.as_mut_ptr() as *mut __m128i,
+                _mm256_extracti128_si256::<1>(self.0),
+            );
+        }
+    }
+    #[inline(always)]
+    fn add(self, o: Self) -> Self {
+        unsafe { V16x16(_mm256_add_epi16(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn sub(self, o: Self) -> Self {
+        unsafe { V16x16(_mm256_sub_epi16(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn max(self, o: Self) -> Self {
+        unsafe { V16x16(_mm256_max_epi16(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn min(self, o: Self) -> Self {
+        unsafe { V16x16(_mm256_min_epi16(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn absdiff(self, o: Self) -> Self {
+        unsafe {
+            V16x16(_mm256_or_si256(
+                _mm256_subs_epu16(self.0, o.0),
+                _mm256_subs_epu16(o.0, self.0),
+            ))
+        }
+    }
+    #[inline(always)]
+    fn gt(self, o: Self) -> Self {
+        unsafe { V16x16(_mm256_cmpgt_epi16(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn and(self, o: Self) -> Self {
+        unsafe { V16x16(_mm256_and_si256(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn or(self, o: Self) -> Self {
+        unsafe { V16x16(_mm256_or_si256(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn andnot(self, o: Self) -> Self {
+        unsafe { V16x16(_mm256_andnot_si256(self.0, o.0)) }
+    }
+    #[inline(always)]
+    fn select(mask: Self, a: Self, b: Self) -> Self {
+        unsafe { V16x16(_mm256_blendv_epi8(b.0, a.0, mask.0)) }
+    }
+    #[inline(always)]
+    fn sra(self, n: u32) -> Self {
+        unsafe { V16x16(_mm256_sra_epi16(self.0, _mm_cvtsi32_si128(n as i32))) }
+    }
+    #[inline(always)]
+    fn srl(self, n: u32) -> Self {
+        unsafe { V16x16(_mm256_srl_epi16(self.0, _mm_cvtsi32_si128(n as i32))) }
+    }
+    #[inline(always)]
+    fn any(self) -> bool {
+        unsafe { _mm256_testz_si256(self.0, self.0) == 0 }
+    }
+    #[inline(always)]
+    fn transpose(v: &mut [Self; 8]) {
+        unsafe {
+            let a0 = _mm256_unpacklo_epi16(v[0].0, v[1].0);
+            let a1 = _mm256_unpackhi_epi16(v[0].0, v[1].0);
+            let a2 = _mm256_unpacklo_epi16(v[2].0, v[3].0);
+            let a3 = _mm256_unpackhi_epi16(v[2].0, v[3].0);
+            let a4 = _mm256_unpacklo_epi16(v[4].0, v[5].0);
+            let a5 = _mm256_unpackhi_epi16(v[4].0, v[5].0);
+            let a6 = _mm256_unpacklo_epi16(v[6].0, v[7].0);
+            let a7 = _mm256_unpackhi_epi16(v[6].0, v[7].0);
+            let b0 = _mm256_unpacklo_epi32(a0, a2);
+            let b1 = _mm256_unpackhi_epi32(a0, a2);
+            let b2 = _mm256_unpacklo_epi32(a1, a3);
+            let b3 = _mm256_unpackhi_epi32(a1, a3);
+            let b4 = _mm256_unpacklo_epi32(a4, a6);
+            let b5 = _mm256_unpackhi_epi32(a4, a6);
+            let b6 = _mm256_unpacklo_epi32(a5, a7);
+            let b7 = _mm256_unpackhi_epi32(a5, a7);
+            v[0] = V16x16(_mm256_unpacklo_epi64(b0, b4));
+            v[1] = V16x16(_mm256_unpackhi_epi64(b0, b4));
+            v[2] = V16x16(_mm256_unpacklo_epi64(b1, b5));
+            v[3] = V16x16(_mm256_unpackhi_epi64(b1, b5));
+            v[4] = V16x16(_mm256_unpacklo_epi64(b2, b6));
+            v[5] = V16x16(_mm256_unpackhi_epi64(b2, b6));
+            v[6] = V16x16(_mm256_unpacklo_epi64(b3, b7));
+            v[7] = V16x16(_mm256_unpackhi_epi64(b3, b7));
+        }
+    }
+}
+
+/// [`super::lf::edges_scalar`] with AVX2, sixteen positions at a time.
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn lf_avx2(
+    buf: &mut [u16],
+    stride: usize,
+    x0: usize,
+    y0: usize,
+    vertical: bool,
+    first: usize,
+    n_edges: usize,
+    n_runs: usize,
+    e: &super::lf::Edges,
+    bit_depth: u32,
+) {
+    super::lf::edges_simd::<V16x16>(
+        buf, stride, x0, y0, vertical, first, n_edges, n_runs, e, bit_depth,
     );
 }

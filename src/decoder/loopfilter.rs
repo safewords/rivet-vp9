@@ -361,41 +361,56 @@ fn superblock(
     let mi_rows = h.mi_rows;
     let mi_cols = h.mi_cols;
     // Every decision below depends on the 8x8 block a sample's luma
-    // position falls in, and a run of four samples along an edge never
-    // leaves one (in any subsampling): decide once per run.
+    // position falls in (the even one, subsampled). A cell of 8 x 8 plane
+    // samples has two edges 4 apart and two runs of 4 along each, all in
+    // the same block: decide once per cell what depends only on the block,
+    // then per edge and run what depends on their own position (onScreen,
+    // the block and transform edges, the 16-wide filter at the last column
+    // or row, the transform edge exception at an odd right edge).
     let n_edges = 16usize >> sub;
     let n_runs = edge_len as usize / 4;
-    for edge in 0..(16u32 >> sub) {
-        for i in (0..edge_len).step_by(4) {
-            let run = (i / 4) as usize;
-            e.fs[edge as usize][run] = lf::SKIP;
-            let (x, y) = if pass == 0 {
-                (col * 8 + edge * (4 << sub_x), row * 8 + (i << sub_y))
-            } else {
-                (col * 8 + (i << sub_x), row * 8 + edge * (4 << sub_y))
-            };
-            // onScreen (step 13).
-            if x >= 8 * mi_cols
-                || y >= 8 * mi_rows
-                || (pass == 0 && x == 0)
-                || (pass == 1 && y == 0)
-            {
+    for row in e.fs.iter_mut().take(n_edges) {
+        row[..n_runs].fill(lf::SKIP);
+    }
+    // Luma coordinates of edge `ed`, run `rn`.
+    let at = |ed: u32, rn: u32| {
+        if pass == 0 {
+            (col * 8 + ed * (4 << sub_x), row * 8 + ((4 * rn) << sub_y))
+        } else {
+            (col * 8 + ((4 * rn) << sub_x), row * 8 + ed * (4 << sub_y))
+        }
+    };
+    let (ux, uy) = if h.legacy_uv {
+        (1, 1)
+    } else {
+        (h.subsampling_x as usize, h.subsampling_y as usize)
+    };
+    for ca in 0..(n_edges / 2) as u32 {
+        for cb in 0..(n_runs / 2) as u32 {
+            let (x, y) = at(2 * ca, 2 * cb);
+            // onScreen (step 13): every other position of the cell is
+            // further right or down.
+            if x >= 8 * mi_cols || y >= 8 * mi_rows {
                 continue;
             }
             let loop_col = ((x >> 3) >> sub_x) << sub_x;
             let loop_row = ((y >> 3) >> sub_y) << sub_y;
             let m = &mi[(loop_row * mi_cols + loop_col) as usize];
+            // Adaptive filter strength (8.8.4).
+            let mode = m.y_mode;
+            let mode_type = (mode == NEARESTMV || mode == NEARMV || mode == NEWMV) as usize;
+            let rf = m.ref_frame[0].max(0) as usize;
+            let l = lvl[m.segment_id as usize][rf][mode_type];
+            if l == 0 {
+                continue;
+            }
+            let (limit, blimit, thresh) = params[l as usize];
             let mi_size = m.mi_size;
             let tx_sz = if plane > 0 {
                 if mi_size < BLOCK_8X8 {
                     TX_4X4
                 } else {
                     // As get_uv_tx_size (4:2:0's for a legacy stream).
-                    let (ux, uy) = if h.legacy_uv {
-                        (1, 1)
-                    } else {
-                        (h.subsampling_x as usize, h.subsampling_y as usize)
-                    };
                     let uv = SS_SIZE_LOOKUP[mi_size as usize][ux][uy];
                     m.tx_size.min(MAX_TXSIZE_LOOKUP[uv as usize])
                 }
@@ -407,55 +422,68 @@ fn superblock(
             } else {
                 mi_size.max(BLOCK_16X16)
             };
-            let is_intra = m.ref_frame[0] <= INTRA_FRAME;
-            let is_block_edge = if pass == 0 {
-                x % (8 * NUM_8X8_WIDE[sb_size as usize] as u32) == 0
+            // Block sizes are powers of two: masks, not divisions.
+            let block_mask = if pass == 0 {
+                8 * NUM_8X8_WIDE[sb_size as usize] as u32 - 1
             } else {
-                y % (8 * NUM_8X8_HIGH[sb_size as usize] as u32) == 0
+                8 * NUM_8X8_HIGH[sb_size as usize] as u32 - 1
             };
-            let is_tx_edge = if pass == 1
-                && sub_x == 1
-                && mi_cols & 1 == 1
-                && edge & 1 == 1
-                && (x + 8) >= mi_cols * 8
-            {
-                false
-            } else {
-                edge % (1 << tx_sz) == 0
-            };
-            let is_32_edge = edge % 8 == 0;
-            let apply = is_block_edge || (is_tx_edge && is_intra) || (is_tx_edge && !m.skip);
-            if !apply {
-                continue;
-            }
-            // Filter size (8.8.3).
-            let base_size = if tx_sz == TX_4X4 && is_32_edge {
-                TX_8X8
-            } else {
-                tx_sz.min(TX_16X16)
-            };
-            let filter_size =
-                if (pass == 0 && sub_x == 1 && base_size == TX_16X16 && (x >> 3) == mi_cols - 1)
+            let coded = m.ref_frame[0] <= INTRA_FRAME || !m.skip;
+            for eo in 0..2 {
+                let ed = 2 * ca + eo;
+                let (x, y) = at(ed, 2 * cb);
+                if (pass == 0 && x == 0) || (pass == 1 && y == 0) {
+                    continue;
+                }
+                let across = if pass == 0 { x } else { y };
+                let is_block_edge = across & block_mask == 0;
+                let tx_edge = ed & ((1 << tx_sz) - 1) == 0;
+                if !is_block_edge && !(tx_edge && coded) {
+                    continue;
+                }
+                // Filter size (8.8.3).
+                let is_32_edge = ed % 8 == 0;
+                let base_size = if tx_sz == TX_4X4 && is_32_edge {
+                    TX_8X8
+                } else {
+                    tx_sz.min(TX_16X16)
+                };
+                let filter_size = if (pass == 0
+                    && sub_x == 1
+                    && base_size == TX_16X16
+                    && (x >> 3) == mi_cols - 1)
                     || (pass == 1 && sub_y == 1 && base_size == TX_16X16 && (y >> 3) == mi_rows - 1)
                 {
                     TX_8X8
                 } else {
                     base_size
                 };
-            // Adaptive filter strength (8.8.4).
-            let mode = m.y_mode;
-            let mode_type = (mode == NEARESTMV || mode == NEARMV || mode == NEWMV) as usize;
-            let rf = m.ref_frame[0].max(0) as usize;
-            let l = lvl[m.segment_id as usize][rf][mode_type];
-            if l == 0 {
-                continue;
+                for k in 0..2 {
+                    let rn = 2 * cb + k;
+                    let (x, y) = at(ed, rn);
+                    if k == 1 && (x >= 8 * mi_cols || y >= 8 * mi_rows) {
+                        break;
+                    }
+                    let is_tx_edge = if pass == 1
+                        && sub_x == 1
+                        && mi_cols & 1 == 1
+                        && ed & 1 == 1
+                        && (x + 8) >= mi_cols * 8
+                    {
+                        false
+                    } else {
+                        tx_edge
+                    };
+                    if !(is_block_edge || (is_tx_edge && coded)) {
+                        continue;
+                    }
+                    let (ed, rn) = (ed as usize, rn as usize);
+                    e.fs[ed][rn] = filter_size as i8;
+                    e.limit[ed][rn] = limit as u8;
+                    e.blimit[ed][rn] = blimit as u8;
+                    e.thresh[ed][rn] = thresh as u8;
+                }
             }
-            let (limit, blimit, thresh) = params[l as usize];
-            let ed = edge as usize;
-            e.fs[ed][run] = filter_size as i8;
-            e.limit[ed][run] = limit as u8;
-            e.blimit[ed][run] = blimit as u8;
-            e.thresh[ed][run] = thresh as u8;
         }
     }
     Geometry {

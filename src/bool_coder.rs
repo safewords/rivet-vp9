@@ -42,6 +42,19 @@ impl<'a> BoolDecoder<'a> {
 
     #[inline(always)]
     fn fill(&mut self) {
+        if self.bits >= 0 && self.pos + 8 <= self.data.len() {
+            // As many whole bytes as fit, from one 8-byte load: the loop
+            // below's bytes, at once.
+            let bits = self.bits as u32;
+            let k = (64 - bits) / 8;
+            let keep = bits + 8 * k;
+            let x = u64::from_be_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
+            let mask = if keep >= 64 { !0 } else { !0u64 << (64 - keep) };
+            self.value |= (x >> bits) & mask;
+            self.pos += k as usize;
+            self.bits += 8 * k as i32;
+            return;
+        }
         while self.bits <= 56 {
             if self.pos < self.data.len() {
                 self.value |= (self.data[self.pos] as u64) << (56 - self.bits);

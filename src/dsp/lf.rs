@@ -190,6 +190,15 @@ pub(crate) fn filter_edges(
 ) {
     match level {
         #[cfg(target_arch = "x86_64")]
+        Level::Avx2 if n_runs.is_multiple_of(4) => {
+            // SAFETY: AVX2 is present at this level.
+            unsafe {
+                super::x86::lf_avx2(
+                    buf, stride, x0, y0, vertical, first, n_edges, n_runs, e, bit_depth,
+                )
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
         Level::Avx2 | Level::Sse41 if n_runs.is_multiple_of(2) => {
             // SAFETY: SSE4.1 is present at these levels.
             unsafe {
@@ -256,13 +265,21 @@ pub(crate) fn edges_scalar(
 /// The SIMD implementations use instructions of their instruction set: the
 /// methods may only run where it is present (the dispatcher checks).
 pub(crate) trait V16: Copy {
+    /// Runs of 4 positions per vector: 2 (8 lanes) or 4 (16 lanes).
+    const RUNS: usize;
     fn splat(v: i16) -> Self;
-    /// Lanes 0-3 `a`, lanes 4-7 `b`.
-    fn halves(a: i16, b: i16) -> Self;
-    /// Loads 8 samples.
+    /// Lanes 4r..4r+4 hold `v[r]`, for each run `r`.
+    fn per_run(v: [i16; 4]) -> Self;
+    /// Loads `4 * RUNS` samples.
     fn load(src: &[u16]) -> Self;
-    /// Stores 8 samples.
+    /// Stores `4 * RUNS` samples.
     fn store(self, dst: &mut [u16]);
+    /// Loads 8 samples of each of two rows: `a` into the low 8 lanes, `b`
+    /// into the high 8 (16 lanes; with 8, `a` alone).
+    fn load2(a: &[u16], b: &[u16]) -> Self;
+    /// Stores the low 8 lanes to `a`, the high 8 to `b` (16 lanes; with 8,
+    /// all to `a`).
+    fn store2(self, a: &mut [u16], b: &mut [u16]);
     fn add(self, o: Self) -> Self;
     fn sub(self, o: Self) -> Self;
     fn max(self, o: Self) -> Self;
@@ -283,7 +300,8 @@ pub(crate) trait V16: Copy {
     fn srl(self, n: u32) -> Self;
     /// Whether any lane is nonzero.
     fn any(self) -> bool;
-    /// Transposes the 8 x 8 matrix whose rows are `v`.
+    /// Transposes the 8 x 8 matrix whose rows are `v` (with 16 lanes, the
+    /// two 8 x 8 matrices of the low and high lanes).
     fn transpose(v: &mut [Self; 8]);
 }
 
@@ -300,17 +318,27 @@ struct LaneParams<V> {
 
 #[inline(always)]
 fn params<V: V16>(e: &Edges, ed: usize, r: usize, sh: u32) -> Option<LaneParams<V>> {
-    let (a, b) = (e.fs[ed][r], e.fs[ed][r + 1]);
-    if a == SKIP && b == SKIP {
+    let fs = &e.fs[ed][r..r + V::RUNS];
+    if fs.iter().all(|&f| f == SKIP) {
         return None;
     }
-    let p = |t: &[[u8; 16]; 16]| V::halves((t[ed][r] as i16) << sh, (t[ed][r + 1] as i16) << sh);
+    let lanes = |t: &[[u8; 16]; 16], sh: u32| {
+        let mut v = [0i16; 4];
+        for (k, x) in v.iter_mut().enumerate().take(V::RUNS) {
+            *x = (t[ed][r + k] as i16) << sh;
+        }
+        V::per_run(v)
+    };
+    let mut f = [0i16; 4];
+    for (k, x) in f.iter_mut().enumerate().take(V::RUNS) {
+        *x = fs[k] as i16;
+    }
     Some(LaneParams {
-        fs: V::halves(a as i16, b as i16),
-        limit: p(&e.limit),
-        blimit: p(&e.blimit),
-        thresh: p(&e.thresh),
-        wide16: a == 2 || b == 2,
+        fs: V::per_run(f),
+        limit: lanes(&e.limit, sh),
+        blimit: lanes(&e.blimit, sh),
+        thresh: lanes(&e.thresh, sh),
+        wide16: fs.contains(&2),
     })
 }
 
@@ -460,8 +488,11 @@ pub(crate) fn edges_simd<V: V16>(
 ) {
     let sh = bit_depth - 8;
     let mut s = [V::splat(0); 16];
+    // With 16 lanes, rows y..y+8 in the low lanes and y+8..y+16 in the
+    // high ones.
+    let two = V::RUNS == 4;
     if vertical {
-        for g in (0..n_runs).step_by(2) {
+        for g in (0..n_runs).step_by(V::RUNS) {
             let y = y0 + 4 * g;
             for ed in first..n_edges {
                 let Some(p) = params::<V>(e, ed, g, sh) else {
@@ -476,7 +507,12 @@ pub(crate) fn edges_simd<V: V16>(
                     // Narrow: the 8 columns x-4..x+4 in one transpose.
                     let col = if p.wide16 { col } else { x - 4 };
                     for r in 0..8 {
-                        t[r] = V::load(&buf[(y + r) * stride + col..]);
+                        t[r] = if two {
+                            let (lo, hi) = buf.split_at(stride * (y + 8 + r) + col);
+                            V::load2(&lo[(y + r) * stride + col..], hi)
+                        } else {
+                            V::load(&buf[(y + r) * stride + col..])
+                        };
                     }
                     V::transpose(&mut t);
                     let base = if p.wide16 { 8 * half } else { 4 };
@@ -492,7 +528,12 @@ pub(crate) fn edges_simd<V: V16>(
                     t.copy_from_slice(&s[base..base + 8]);
                     V::transpose(&mut t);
                     for r in 0..8 {
-                        t[r].store(&mut buf[(y + r) * stride + col..]);
+                        if two {
+                            let (lo, hi) = buf.split_at_mut(stride * (y + 8 + r) + col);
+                            t[r].store2(&mut lo[(y + r) * stride + col..], hi);
+                        } else {
+                            t[r].store(&mut buf[(y + r) * stride + col..]);
+                        }
                     }
                 }
             }
@@ -500,7 +541,7 @@ pub(crate) fn edges_simd<V: V16>(
     } else {
         for ed in first..n_edges {
             let y = y0 + 4 * ed;
-            for g in (0..n_runs).step_by(2) {
+            for g in (0..n_runs).step_by(V::RUNS) {
                 let Some(p) = params::<V>(e, ed, g, sh) else {
                     continue;
                 };

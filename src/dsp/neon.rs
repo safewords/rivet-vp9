@@ -215,13 +215,22 @@ pub(crate) struct V16x8(int16x8_t);
 // SAFETY: NEON is always present; loads and stores go through 8-sample
 // slices.
 impl super::lf::V16 for V16x8 {
+    const RUNS: usize = 2;
     #[inline(always)]
     fn splat(v: i16) -> Self {
         unsafe { V16x8(vdupq_n_s16(v)) }
     }
     #[inline(always)]
-    fn halves(a: i16, b: i16) -> Self {
-        unsafe { V16x8(vcombine_s16(vdup_n_s16(a), vdup_n_s16(b))) }
+    fn per_run(v: [i16; 4]) -> Self {
+        unsafe { V16x8(vcombine_s16(vdup_n_s16(v[0]), vdup_n_s16(v[1]))) }
+    }
+    #[inline(always)]
+    fn load2(a: &[u16], _: &[u16]) -> Self {
+        Self::load(a)
+    }
+    #[inline(always)]
+    fn store2(self, a: &mut [u16], _: &mut [u16]) {
+        self.store(a)
     }
     #[inline(always)]
     fn load(src: &[u16]) -> Self {

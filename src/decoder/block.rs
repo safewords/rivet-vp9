@@ -1303,50 +1303,48 @@ impl<'a> FrameDec<'a> {
             }
         }
         let mut ctx = (above + left) as usize;
-        let n = 4usize << tx_sz;
-        let log2n = 2 + tx_sz as u32;
+        let neighbors = neighbors(tx_sz, tx_type);
+        let bands: &[u8] = if tx_sz == TX_4X4 {
+            &COEFBAND_4X4
+        } else {
+            &COEFBAND_8X8PLUS
+        };
+        let coef_probs = &self.probs.coef[txs][ptype][ref_type];
+        // The symbol counts matter only when the frame adapts its
+        // probabilities afterwards.
+        let count = !self.h.error_resilient_mode && !self.h.frame_parallel_decoding_mode;
         let mut check_eob = true;
         let mut c = 0usize;
         let bd = self.bit_depth;
         while c < seg_eob {
             let pos = scan[c] as usize;
-            let band = if tx_sz == TX_4X4 {
-                COEFBAND_4X4[c]
-            } else {
-                COEFBAND_8X8PLUS[c]
-            } as usize;
+            let band = bands[c] as usize;
             if c > 0 {
                 // Neighbour context.
-                let i = pos >> log2n;
-                let j = pos & (n - 1);
-                let (a, b) = if i > 0 && j > 0 {
-                    let a = (i - 1) * n + j;
-                    let a2 = i * n + j - 1;
-                    match tx_type {
-                        DCT_ADST => (a, a),
-                        ADST_DCT => (a2, a2),
-                        _ => (a, a2),
-                    }
-                } else if i > 0 {
-                    ((i - 1) * n + j, (i - 1) * n + j)
-                } else {
-                    (j - 1, j - 1)
-                };
-                ctx = (1 + self.token_cache[a] as usize + self.token_cache[b] as usize) >> 1;
+                let [a, b] = neighbors[c];
+                ctx = (1
+                    + self.token_cache[a as usize] as usize
+                    + self.token_cache[b as usize] as usize)
+                    >> 1;
             }
-            let probs = &self.probs.coef[txs][ptype][ref_type][band][ctx];
+            let probs = &coef_probs[band][ctx];
             if check_eob {
                 let more = d.read(probs[0]);
-                self.counts.more_coefs[txs][ptype][ref_type][band][ctx][more as usize] += 1;
+                if count {
+                    self.counts.more_coefs[txs][ptype][ref_type][band][ctx][more as usize] += 1;
+                }
                 if !more {
                     break;
                 }
             }
             let token = d.tree(&TOKEN_TREE, |node| pareto(node, probs[(1 + node).min(2)]));
-            self.counts.token[txs][ptype][ref_type][band][ctx][(token as usize).min(2)] += 1;
+            if count {
+                self.counts.token[txs][ptype][ref_type][band][ctx][(token as usize).min(2)] += 1;
+            }
             self.token_cache[pos] = ENERGY_CLASS[token as usize];
             if token == ZERO_TOKEN {
-                self.coefs[pos] = 0;
+                // The coefficients are zero but where the last block's
+                // scan wrote them, and reconstruct cleared those.
                 check_eob = false;
             } else {
                 let coef = read_coef(d, token, bd);
@@ -1378,6 +1376,54 @@ fn read_coef(d: &mut BoolDecoder, token: u8, bit_depth: u32) -> i32 {
         coef += bit << (num_extra - 1 - e);
     }
     coef
+}
+
+/// The neighbours of each scan position whose token energies give the
+/// context of the next coefficient (6.4.24's above / left): for scan
+/// index `c > 0` of a `tx_sz` block of `tx_type`, the two positions.
+fn neighbors(tx_sz: u8, tx_type: u8) -> &'static [[u16; 2]] {
+    static TABLES: std::sync::OnceLock<Vec<Vec<[u16; 2]>>> = std::sync::OnceLock::new();
+    let kind = |t: u8| match t {
+        DCT_ADST => 1,
+        ADST_DCT => 2,
+        _ => 0,
+    };
+    let t = TABLES.get_or_init(|| {
+        let mut v = Vec::new();
+        for txs in 0..4u8 {
+            for tx_type in [DCT_DCT, DCT_ADST, ADST_DCT] {
+                let n = 4usize << txs;
+                let log2n = 2 + txs as u32;
+                let sc = scan(txs, tx_type);
+                let nb: Vec<[u16; 2]> = sc
+                    .iter()
+                    .map(|&pos| {
+                        let pos = pos as usize;
+                        let i = pos >> log2n;
+                        let j = pos & (n - 1);
+                        let (a, b) = if i > 0 && j > 0 {
+                            let a = (i - 1) * n + j;
+                            let a2 = i * n + j - 1;
+                            match tx_type {
+                                DCT_ADST => (a, a),
+                                ADST_DCT => (a2, a2),
+                                _ => (a, a2),
+                            }
+                        } else if i > 0 {
+                            ((i - 1) * n + j, (i - 1) * n + j)
+                        } else {
+                            // Scan index 0 (position 0) has no neighbours.
+                            (j.saturating_sub(1), j.saturating_sub(1))
+                        };
+                        [a as u16, b as u16]
+                    })
+                    .collect();
+                v.push(nb);
+            }
+        }
+        v
+    });
+    &t[tx_sz as usize * 3 + kind(tx_type)]
 }
 
 /// The scan order of get_scan (6.4.25).
