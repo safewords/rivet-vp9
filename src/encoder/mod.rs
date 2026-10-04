@@ -47,6 +47,7 @@
 
 pub(crate) mod fdct;
 mod rc;
+mod scratch;
 mod tile;
 
 pub use rc::{FirstPass, FirstPassStats, GOLDEN_BOOST, KEY_BOOST};

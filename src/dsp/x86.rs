@@ -10,7 +10,7 @@
 
 use std::arch::x86_64::*;
 
-use super::itx::{Lane, inverse_add_n};
+use super::itx::Lane;
 
 // ---------------------------------------------------------------------
 // Inverse transforms: 32-bit lanes, 8 (AVX2) or 4 (SSE4.1) at a time.
@@ -29,11 +29,7 @@ pub(crate) struct V4(__m128i);
 // lane count, bounds-checked.
 impl Lane for V8 {
     const W: usize = 8;
-    type Cols = [[V8; 32]; 4];
-    #[inline(always)]
-    fn cols() -> Self::Cols {
-        [[V8::zero(); 32]; 4]
-    }
+    super::itx::lane_sizes!(8);
     #[inline(always)]
     fn zero() -> Self {
         unsafe { V8(_mm256_setzero_si256()) }
@@ -125,11 +121,7 @@ impl Lane for V8 {
 
 impl Lane for V4 {
     const W: usize = 4;
-    type Cols = [[V4; 32]; 8];
-    #[inline(always)]
-    fn cols() -> Self::Cols {
-        [[V4::zero(); 32]; 8]
-    }
+    super::itx::lane_sizes!(4);
     #[inline(always)]
     fn zero() -> Self {
         unsafe { V4(_mm_setzero_si128()) }
@@ -213,7 +205,7 @@ pub(crate) unsafe fn itx_avx2(
     dst: &mut [u16],
     stride: usize,
 ) {
-    inverse_add_n::<V8>(coefs, n, tx_type, lossless, dst, stride, 255);
+    V8::inverse_add(coefs, n, tx_type, lossless, dst, stride, 255);
 }
 
 /// The 8-bit inverse transform and reconstruction with SSE4.1.
@@ -226,7 +218,7 @@ pub(crate) unsafe fn itx_sse41(
     dst: &mut [u16],
     stride: usize,
 ) {
-    inverse_add_n::<V4>(coefs, n, tx_type, lossless, dst, stride, 255);
+    V4::inverse_add(coefs, n, tx_type, lossless, dst, stride, 255);
 }
 
 // ---------------------------------------------------------------------
@@ -598,19 +590,36 @@ pub(crate) unsafe fn lf_sse41(
 /// [`crate::encoder::fdct::forward_scalar`] with SSE4.1, any size.
 #[target_feature(enable = "sse4.1")]
 pub(crate) unsafe fn fdct_sse41(t: &crate::encoder::fdct::Fwd2d, res: &[i16], out: &mut [i32]) {
+    // Scratch of exactly the block's size: nothing larger to clear.
+    match t.fc.n0 {
+        4 => fdct_sse41_n::<16, 2>(t, res, out),
+        8 => fdct_sse41_n::<64, 4>(t, res, out),
+        16 => fdct_sse41_n::<256, 8>(t, res, out),
+        _ => fdct_sse41_n::<1024, 16>(t, res, out),
+    }
+}
+
+/// [`fdct_sse41`] for `NN` = n0 * n0 coefficients, `HALF` = n0 / 2.
+#[target_feature(enable = "sse4.1")]
+unsafe fn fdct_sse41_n<const NN: usize, const HALF: usize>(
+    t: &crate::encoder::fdct::Fwd2d,
+    res: &[i16],
+    out: &mut [i32],
+) {
     let n0 = t.fc.n0;
     let half = n0 / 2;
+    assert!(half == HALF && NN == n0 * n0);
     assert!(res.len() >= n0 * n0 && out.len() >= n0 * n0);
     assert!(t.fc.pk.len() >= n0 * half && t.fr.cols.len() >= half * n0);
-    let mut u = [0i16; 32 * 32];
+    let mut u = [0i16; NN];
     let rnd = _mm_set1_epi32(1 << (t.shift1 - 1));
     let sh = _mm_cvtsi32_si128(t.shift1 as i32);
     let rp = res.as_ptr();
     let up = u.as_mut_ptr();
     let width = n0.min(8);
     for c in (0..n0).step_by(8) {
-        let mut il_lo = [_mm_setzero_si128(); 16];
-        let mut il_hi = [_mm_setzero_si128(); 16];
+        let mut il_lo = [_mm_setzero_si128(); HALF];
+        let mut il_hi = [_mm_setzero_si128(); HALF];
         for kp in 0..half {
             let (a, b) = if width == 4 {
                 (
@@ -663,18 +672,32 @@ pub(crate) unsafe fn fdct_sse41(t: &crate::encoder::fdct::Fwd2d, res: &[i16], ou
 /// [`fdct_sse41`] with AVX2, 16 x 16 and 32 x 32.
 #[target_feature(enable = "avx2")]
 pub(crate) unsafe fn fdct_avx2(t: &crate::encoder::fdct::Fwd2d, res: &[i16], out: &mut [i32]) {
+    match t.fc.n0 {
+        16 => fdct_avx2_n::<256, 8>(t, res, out),
+        _ => fdct_avx2_n::<1024, 16>(t, res, out),
+    }
+}
+
+/// [`fdct_avx2`] for `NN` = n0 * n0 coefficients, `HALF` = n0 / 2.
+#[target_feature(enable = "avx2")]
+unsafe fn fdct_avx2_n<const NN: usize, const HALF: usize>(
+    t: &crate::encoder::fdct::Fwd2d,
+    res: &[i16],
+    out: &mut [i32],
+) {
     let n0 = t.fc.n0;
     let half = n0 / 2;
+    assert!(half == HALF && NN == n0 * n0);
     assert!(n0 >= 16 && res.len() >= n0 * n0 && out.len() >= n0 * n0);
     assert!(t.fc.pk.len() >= n0 * half && t.fr.cols.len() >= half * n0);
-    let mut u = [0i16; 32 * 32];
+    let mut u = [0i16; NN];
     let rnd = _mm256_set1_epi32(1 << (t.shift1 - 1));
     let sh = _mm_cvtsi32_si128(t.shift1 as i32);
     let rp = res.as_ptr();
     let up = u.as_mut_ptr();
     for c in (0..n0).step_by(16) {
-        let mut il_lo = [_mm256_setzero_si256(); 16];
-        let mut il_hi = [_mm256_setzero_si256(); 16];
+        let mut il_lo = [_mm256_setzero_si256(); HALF];
+        let mut il_hi = [_mm256_setzero_si256(); HALF];
         for kp in 0..half {
             let a = _mm256_loadu_si256(rp.add(2 * kp * n0 + c) as *const __m256i);
             let b = _mm256_loadu_si256(rp.add((2 * kp + 1) * n0 + c) as *const __m256i);

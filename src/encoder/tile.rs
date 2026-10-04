@@ -27,7 +27,7 @@ use crate::header::FrameHeader;
 use crate::tables::*;
 
 use super::Config;
-use super::fdct;
+use super::{fdct, scratch};
 
 /// The source picture, padded to whole superblocks by repeating its edges.
 pub(crate) struct Source {
@@ -72,12 +72,27 @@ struct TxBlock<'a> {
 
 /// The transform blocks of one plane of a block, in syntax order; `None`
 /// for those outside the frame. Their coefficients are kept one after the
-/// other.
-#[derive(Default)]
+/// other. The buffers come from and go back to the [`scratch`] pools.
 struct PlaneCoding {
     /// (offset in `coefs`, size, tx_type, eob).
     blocks: Vec<Option<(usize, usize, u8, usize)>>,
     coefs: Vec<i32>,
+}
+
+impl Default for PlaneCoding {
+    fn default() -> Self {
+        PlaneCoding {
+            blocks: scratch::take_blocks(),
+            coefs: scratch::take_i32(),
+        }
+    }
+}
+
+impl Drop for PlaneCoding {
+    fn drop(&mut self) {
+        scratch::give_blocks(std::mem::take(&mut self.blocks));
+        scratch::give_i32(std::mem::take(&mut self.coefs));
+    }
 }
 
 impl PlaneCoding {
@@ -137,6 +152,27 @@ struct Snap {
     left_nz: [Vec<u8>; 3],
     above_part: Vec<u8>,
     left_part: Vec<u8>,
+}
+
+impl Drop for Snap {
+    fn drop(&mut self) {
+        for v in &mut self.planes {
+            scratch::give_u16(std::mem::take(v));
+        }
+        scratch::give_mi(std::mem::take(&mut self.mi));
+        for v in self.above_nz.iter_mut().chain(self.left_nz.iter_mut()) {
+            scratch::give_u8(std::mem::take(v));
+        }
+        scratch::give_u8(std::mem::take(&mut self.above_part));
+        scratch::give_u8(std::mem::take(&mut self.left_part));
+    }
+}
+
+/// A copy of `src` in a buffer from the [`scratch`] pool.
+fn pooled_u8(src: &[u8]) -> Vec<u8> {
+    let mut v = scratch::take_u8();
+    v.extend_from_slice(src);
+    v
 }
 
 pub(crate) struct TileEncoder<'a> {
@@ -374,16 +410,16 @@ impl<'a> TileEncoder<'a> {
         for p in 0..3 {
             let [x, y, w, h] = self.region(p, r, c, bw8, bh8);
             let b = &fd.planes[p];
-            let mut v = Vec::with_capacity(w * h);
+            let mut v = scratch::take_u16();
             for i in 0..h {
                 let at = b.at(x, y + i);
                 v.extend_from_slice(&b.data[at..at + w]);
             }
             planes[p] = v;
-            above_nz[p] = fd.above_nonzero[p][x >> 2..(x + w).div_ceil(4)].to_vec();
-            left_nz[p] = fd.left_nonzero[p][y >> 2..(y + h).div_ceil(4)].to_vec();
+            above_nz[p] = pooled_u8(&fd.above_nonzero[p][x >> 2..(x + w).div_ceil(4)]);
+            left_nz[p] = pooled_u8(&fd.left_nonzero[p][y >> 2..(y + h).div_ceil(4)]);
         }
-        let mut mi = Vec::new();
+        let mut mi = scratch::take_mi();
         for y in r..(r + bh8).min(self.h.mi_rows) {
             for x in c..(c + bw8).min(self.h.mi_cols) {
                 mi.push(*fd.mi_at(y, x));
@@ -398,8 +434,8 @@ impl<'a> TileEncoder<'a> {
             mi,
             above_nz,
             left_nz,
-            above_part: fd.above_partition[c as usize..(c + bw8) as usize].to_vec(),
-            left_part: fd.left_partition[r as usize..(r + bh8) as usize].to_vec(),
+            above_part: pooled_u8(&fd.above_partition[c as usize..(c + bw8) as usize]),
+            left_part: pooled_u8(&fd.left_partition[r as usize..(r + bh8) as usize]),
         }
     }
 
@@ -684,7 +720,7 @@ impl<'a> TileEncoder<'a> {
     fn save(&self, fd: &FrameDec, plane: usize) -> Vec<u16> {
         let (x, y, w, h, _) = self.plane_region(fd, plane);
         let b = &fd.planes[plane];
-        let mut v = Vec::with_capacity(w * h);
+        let mut v = scratch::take_u16();
         for i in 0..h {
             let at = b.at(x, y + i);
             v.extend_from_slice(&b.data[at..at + w]);
@@ -858,6 +894,9 @@ impl<'a> TileEncoder<'a> {
             }
             self.restore_plane(fd, 1, &saved[1]);
             self.restore_plane(fd, 2, &saved[2]);
+        }
+        for v in saved {
+            scratch::give_u16(v);
         }
         tx_set
             .iter()

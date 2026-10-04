@@ -9,7 +9,7 @@
 
 use std::arch::aarch64::*;
 
-use super::itx::{Lane, inverse_add_n};
+use super::itx::Lane;
 
 /// Four 32-bit lanes.
 #[derive(Clone, Copy)]
@@ -19,11 +19,7 @@ pub(crate) struct V4(int32x4_t);
 // slices of the lane count, bounds-checked.
 impl Lane for V4 {
     const W: usize = 4;
-    type Cols = [[V4; 32]; 8];
-    #[inline(always)]
-    fn cols() -> Self::Cols {
-        [[V4::zero(); 32]; 8]
-    }
+    super::itx::lane_sizes!(4);
     #[inline(always)]
     fn zero() -> Self {
         unsafe { V4(vdupq_n_s32(0)) }
@@ -91,7 +87,7 @@ pub(crate) fn itx(
     dst: &mut [u16],
     stride: usize,
 ) {
-    inverse_add_n::<V4>(coefs, n, tx_type, lossless, dst, stride, 255);
+    V4::inverse_add(coefs, n, tx_type, lossless, dst, stride, 255);
 }
 
 #[inline(always)]

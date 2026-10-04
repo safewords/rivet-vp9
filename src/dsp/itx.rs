@@ -44,11 +44,6 @@ const SINPI_4_9: i32 = 15212;
 pub(crate) trait Lane: Copy {
     /// Values per vector: how many rows or columns are transformed at once.
     const W: usize;
-    /// `[[Self; 32]; 32 / W]`: the row transforms' output, by groups of `W`
-    /// columns.
-    type Cols: AsMut<[[Self; 32]]>;
-    /// A zero [`Lane::Cols`].
-    fn cols() -> Self::Cols;
     fn zero() -> Self;
     fn add(self, o: Self) -> Self;
     fn sub(self, o: Self) -> Self;
@@ -69,7 +64,55 @@ pub(crate) trait Lane: Copy {
     /// `0..=max`. The residual is clamped to +-(1 << 16) first, which
     /// changes nothing: a sample is at most 4095.
     fn add_to(self, dst: &mut [u16], max: i32);
+    /// [`inverse_2d_add`] for a `1 << n` block, with the array sizes of
+    /// `n` and `W` ([`lane_sizes`]).
+    #[allow(clippy::too_many_arguments)]
+    fn inverse_add(
+        coefs: &[i32],
+        n: u32,
+        tx_type: u8,
+        lossless: bool,
+        dst: &mut [u16],
+        stride: usize,
+        max: i32,
+    );
 }
+
+/// Implements [`Lane::inverse_add`] for a lane type of `$w` lanes: each
+/// transform size gets arrays of exactly its size (`N0` values per 1D
+/// transform, `N0 / W` groups of columns), nothing larger to clear.
+macro_rules! lane_sizes {
+    ($w:expr) => {
+        #[inline(always)]
+        fn inverse_add(
+            coefs: &[i32],
+            n: u32,
+            tx_type: u8,
+            lossless: bool,
+            dst: &mut [u16],
+            stride: usize,
+            max: i32,
+        ) {
+            use $crate::dsp::itx::inverse_2d_add;
+            match n {
+                2 if $w <= 4 => inverse_2d_add::<Self, 4, { 4 / $w }>(
+                    coefs, 2, tx_type, lossless, dst, stride, max,
+                ),
+                3 => inverse_2d_add::<Self, 8, { 8 / $w }>(
+                    coefs, 3, tx_type, lossless, dst, stride, max,
+                ),
+                4 => inverse_2d_add::<Self, 16, { 16 / $w }>(
+                    coefs, 4, tx_type, lossless, dst, stride, max,
+                ),
+                5 => inverse_2d_add::<Self, 32, { 32 / $w }>(
+                    coefs, 5, tx_type, lossless, dst, stride, max,
+                ),
+                _ => unreachable!("no {}-point transform with {} lanes", 1 << n, $w),
+            }
+        }
+    };
+}
+pub(crate) use lane_sizes;
 
 #[inline(always)]
 fn neg<V: Lane>(v: V) -> V {
@@ -111,7 +154,7 @@ const fn sin64(angle: i32) -> i32 {
 
 /// B( a, b, angle, flip ).
 #[inline(always)]
-fn bfly<V: Lane>(t: &mut [V; 32], a: usize, b: usize, angle: i32, flip: bool) {
+fn bfly<V: Lane, const N: usize>(t: &mut [V; N], a: usize, b: usize, angle: i32, flip: bool) {
     let (c, s) = (cos64(angle), sin64(angle));
     let x = round14(t[a].mul(c).sub(t[b].mul(s)));
     let y = round14(t[a].mul(s).add(t[b].mul(c)));
@@ -126,7 +169,7 @@ fn bfly<V: Lane>(t: &mut [V; 32], a: usize, b: usize, angle: i32, flip: bool) {
 
 /// H( a, b, flip ).
 #[inline(always)]
-fn hada<V: Lane>(t: &mut [V; 32], a: usize, b: usize, flip: bool) {
+fn hada<V: Lane, const N: usize>(t: &mut [V; N], a: usize, b: usize, flip: bool) {
     let (a, b) = if flip { (b, a) } else { (a, b) };
     let x = t[a];
     let y = t[b];
@@ -136,7 +179,14 @@ fn hada<V: Lane>(t: &mut [V; 32], a: usize, b: usize, flip: bool) {
 
 /// SB( a, b, angle, flip ).
 #[inline(always)]
-fn sbfly<V: Lane>(t: &[V; 32], s: &mut [V; 32], a: usize, b: usize, angle: i32, flip: bool) {
+fn sbfly<V: Lane, const N: usize>(
+    t: &[V; N],
+    s: &mut [V; N],
+    a: usize,
+    b: usize,
+    angle: i32,
+    flip: bool,
+) {
     let (c, sn) = (cos64(angle), sin64(angle));
     let x = t[a].mul(c).sub(t[b].mul(sn));
     let y = t[a].mul(sn).add(t[b].mul(c));
@@ -151,7 +201,7 @@ fn sbfly<V: Lane>(t: &[V; 32], s: &mut [V; 32], a: usize, b: usize, angle: i32, 
 
 /// SH( a, b ).
 #[inline(always)]
-fn shada<V: Lane>(t: &mut [V; 32], s: &[V; 32], a: usize, b: usize) {
+fn shada<V: Lane, const N: usize>(t: &mut [V; N], s: &[V; N], a: usize, b: usize) {
     t[a] = round14(s[a].add(s[b]));
     t[b] = round14(s[a].sub(s[b]));
 }
@@ -159,7 +209,7 @@ fn shada<V: Lane>(t: &mut [V; 32], s: &[V; 32], a: usize, b: usize) {
 /// The steps of the inverse DCT process (8.7.1.3) after the recursive call,
 /// for a constant `n`.
 #[inline(always)]
-fn idct_stage<V: Lane>(t: &mut [V; 32], n: u32) {
+fn idct_stage<V: Lane, const N: usize>(t: &mut [V; N], n: u32) {
     let n0 = 1usize << n;
     let n1 = n0 >> 1;
     let n2 = n0 >> 2;
@@ -223,25 +273,25 @@ fn idct_stage<V: Lane>(t: &mut [V; 32], n: u32) {
 }
 
 #[inline(always)]
-fn idct4_core<V: Lane>(t: &mut [V; 32]) {
+fn idct4_core<V: Lane, const N: usize>(t: &mut [V; N]) {
     bfly(t, 0, 1, 16, true);
     idct_stage(t, 2);
 }
 
 #[inline(always)]
-fn idct8_core<V: Lane>(t: &mut [V; 32]) {
+fn idct8_core<V: Lane, const N: usize>(t: &mut [V; N]) {
     idct4_core(t);
     idct_stage(t, 3);
 }
 
 #[inline(always)]
-fn idct16_core<V: Lane>(t: &mut [V; 32]) {
+fn idct16_core<V: Lane, const N: usize>(t: &mut [V; N]) {
     idct8_core(t);
     idct_stage(t, 4);
 }
 
 #[inline(always)]
-fn idct32_core<V: Lane>(t: &mut [V; 32]) {
+fn idct32_core<V: Lane, const N: usize>(t: &mut [V; N]) {
     idct16_core(t);
     idct_stage(t, 5);
 }
@@ -249,7 +299,7 @@ fn idct32_core<V: Lane>(t: &mut [V; 32]) {
 /// Inverse DCT array permutation (8.7.1.2) then the inverse DCT, for a
 /// constant `n`.
 #[inline(always)]
-fn idct<V: Lane>(t: &mut [V; 32], n: u32) {
+fn idct<V: Lane, const N: usize>(t: &mut [V; N], n: u32) {
     let n0 = 1usize << n;
     let copy = *t;
     for i in 0..n0 {
@@ -264,7 +314,7 @@ fn idct<V: Lane>(t: &mut [V; 32], n: u32) {
 }
 
 #[inline(always)]
-fn adst_in_perm<V: Lane>(t: &mut [V; 32], n: u32) {
+fn adst_in_perm<V: Lane, const N: usize>(t: &mut [V; N], n: u32) {
     let n0 = 1usize << n;
     let n1 = n0 >> 1;
     let copy = *t;
@@ -275,7 +325,7 @@ fn adst_in_perm<V: Lane>(t: &mut [V; 32], n: u32) {
 }
 
 #[inline(always)]
-fn adst_out_perm<V: Lane>(t: &mut [V; 32], n: u32) {
+fn adst_out_perm<V: Lane, const N: usize>(t: &mut [V; N], n: u32) {
     let copy = *t;
     if n == 4 {
         for a in 0..2 {
@@ -300,7 +350,7 @@ fn adst_out_perm<V: Lane>(t: &mut [V; 32], n: u32) {
 }
 
 #[inline(always)]
-fn iadst4<V: Lane>(t: &mut [V; 32]) {
+fn iadst4<V: Lane, const N: usize>(t: &mut [V; N]) {
     let s0 = t[0].mul(SINPI_1_9);
     let s1 = t[0].mul(SINPI_2_9);
     let s2 = t[1].mul(SINPI_3_9);
@@ -321,8 +371,8 @@ fn iadst4<V: Lane>(t: &mut [V; 32]) {
 }
 
 #[inline(always)]
-fn iadst8<V: Lane>(t: &mut [V; 32]) {
-    let mut s = [V::zero(); 32];
+fn iadst8<V: Lane, const N: usize>(t: &mut [V; N]) {
+    let mut s = [V::zero(); N];
     adst_in_perm(t, 3);
     for i in 0..4 {
         sbfly(t, &mut s, 2 * i, 1 + 2 * i, 30 - 8 * i as i32, true);
@@ -349,8 +399,8 @@ fn iadst8<V: Lane>(t: &mut [V; 32]) {
 }
 
 #[inline(always)]
-fn iadst16<V: Lane>(t: &mut [V; 32]) {
-    let mut s = [V::zero(); 32];
+fn iadst16<V: Lane, const N: usize>(t: &mut [V; N]) {
+    let mut s = [V::zero(); N];
     adst_in_perm(t, 4);
     for i in 0..8 {
         sbfly(t, &mut s, 2 * i, 1 + 2 * i, 31 - 4 * i as i32, true);
@@ -410,7 +460,7 @@ fn iadst16<V: Lane>(t: &mut [V; 32]) {
 
 /// The inverse ADST process (8.7.1.9), for a constant `n`.
 #[inline(always)]
-fn iadst<V: Lane>(t: &mut [V; 32], n: u32) {
+fn iadst<V: Lane, const N: usize>(t: &mut [V; N], n: u32) {
     match n {
         2 => iadst4(t),
         3 => iadst8(t),
@@ -420,7 +470,7 @@ fn iadst<V: Lane>(t: &mut [V; 32], n: u32) {
 
 /// The inverse Walsh-Hadamard transform (8.7.1.10).
 #[inline(always)]
-fn iwht<V: Lane>(t: &mut [V; 32], shift: u32) {
+fn iwht<V: Lane, const N: usize>(t: &mut [V; N], shift: u32) {
     let mut a = t[0].sar(shift);
     let mut c = t[1].sar(shift);
     let mut d = t[2].sar(shift);
@@ -440,7 +490,13 @@ fn iwht<V: Lane>(t: &mut [V; 32], shift: u32) {
 
 /// The 1D transform of a pass, for a constant `n`.
 #[inline(always)]
-fn tx1d<V: Lane>(t: &mut [V; 32], n: u32, dct: bool, lossless: bool, wht_shift: u32) {
+fn tx1d<V: Lane, const N: usize>(
+    t: &mut [V; N],
+    n: u32,
+    dct: bool,
+    lossless: bool,
+    wht_shift: u32,
+) {
     if lossless {
         iwht(t, wht_shift);
     } else if dct {
@@ -460,7 +516,7 @@ fn tx1d<V: Lane>(t: &mut [V; 32], n: u32, dct: bool, lossless: bool, wht_shift: 
 /// of one row, which is what the column transforms take.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn inverse_2d_add<V: Lane>(
+pub(crate) fn inverse_2d_add<V: Lane, const N0: usize, const G: usize>(
     coefs: &[i32],
     n: u32,
     tx_type: u8,
@@ -471,21 +527,20 @@ fn inverse_2d_add<V: Lane>(
 ) {
     let n0 = 1usize << n;
     let w = V::W;
-    let groups = n0 / w;
+    debug_assert!(n0 == N0 && G * w == N0);
     // cols[g][i]: row i of the row transforms' output, columns g*W.. .
-    let mut cols_store = V::cols();
-    let cols = cols_store.as_mut();
+    let mut cols = [[V::zero(); N0]; G];
     let row_dct = tx_type == DCT_DCT || tx_type == ADST_DCT;
     let col_dct = tx_type == DCT_DCT || tx_type == DCT_ADST;
-    let mut t = [V::zero(); 32];
+    let mut t = [V::zero(); N0];
     let mut tile = [V::zero(); 8];
-    for rg in 0..groups {
+    for rg in 0..G {
         let r0 = rg * w;
         if !lossless && V::rows_zero(&coefs[r0 * n0..], n0) {
             // Zero rows transform to zero; `cols` is zero already.
             continue;
         }
-        for kg in 0..groups {
+        for kg in 0..G {
             for l in 0..w {
                 tile[l] = V::load(&coefs[(r0 + l) * n0 + kg * w..]);
             }
@@ -493,15 +548,15 @@ fn inverse_2d_add<V: Lane>(
             t[kg * w..kg * w + w].copy_from_slice(&tile[..w]);
         }
         tx1d(&mut t, n, row_dct, lossless, 2);
-        for kg in 0..groups {
+        for kg in 0..G {
             tile[..w].copy_from_slice(&t[kg * w..kg * w + w]);
             V::transpose(&mut tile[..w]);
             cols[kg][r0..r0 + w].copy_from_slice(&tile[..w]);
         }
     }
     let shift = (n + 2).min(6);
-    for cg in 0..groups {
-        let mut t = cols[cg];
+    for (cg, col) in cols.iter().enumerate() {
+        let mut t = *col;
         tx1d(&mut t, n, col_dct, lossless, 0);
         for i in 0..n0 {
             let r = if lossless {
@@ -514,37 +569,12 @@ fn inverse_2d_add<V: Lane>(
     }
 }
 
-/// [`inverse_2d_add`] with `n` made constant.
-#[inline(always)]
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn inverse_add_n<V: Lane>(
-    coefs: &[i32],
-    n: u32,
-    tx_type: u8,
-    lossless: bool,
-    dst: &mut [u16],
-    stride: usize,
-    max: i32,
-) {
-    match n {
-        2 => inverse_2d_add::<V>(coefs, 2, tx_type, lossless, dst, stride, max),
-        3 => inverse_2d_add::<V>(coefs, 3, tx_type, lossless, dst, stride, max),
-        4 => inverse_2d_add::<V>(coefs, 4, tx_type, lossless, dst, stride, max),
-        _ => inverse_2d_add::<V>(coefs, 5, tx_type, lossless, dst, stride, max),
-    }
-}
-
 /// One 32-bit value with wrapping arithmetic: the 8-bit scalar lane.
 #[derive(Clone, Copy)]
 pub(crate) struct S32(i32);
 
 impl Lane for S32 {
     const W: usize = 1;
-    type Cols = [[S32; 32]; 32];
-    #[inline(always)]
-    fn cols() -> Self::Cols {
-        [[S32(0); 32]; 32]
-    }
     #[inline(always)]
     fn zero() -> Self {
         S32(0)
@@ -580,6 +610,7 @@ impl Lane for S32 {
         let r = self.0.clamp(-(1 << 16), 1 << 16);
         dst[0] = (dst[0] as i32 + r).clamp(0, max) as u16;
     }
+    lane_sizes!(1);
 }
 
 /// One 64-bit value: the lane above 8 bits, the specification's arithmetic
@@ -589,11 +620,6 @@ pub(crate) struct S64(i64);
 
 impl Lane for S64 {
     const W: usize = 1;
-    type Cols = [[S64; 32]; 32];
-    #[inline(always)]
-    fn cols() -> Self::Cols {
-        [[S64(0); 32]; 32]
-    }
     #[inline(always)]
     fn zero() -> Self {
         S64(0)
@@ -629,10 +655,11 @@ impl Lane for S64 {
         let r = self.0.clamp(-(1 << 16), 1 << 16) as i32;
         dst[0] = (dst[0] as i32 + r).clamp(0, max) as u16;
     }
+    lane_sizes!(1);
 }
 
 fn scalar32(coefs: &[i32], n: u32, tx_type: u8, lossless: bool, dst: &mut [u16], stride: usize) {
-    inverse_add_n::<S32>(coefs, n, tx_type, lossless, dst, stride, 255);
+    S32::inverse_add(coefs, n, tx_type, lossless, dst, stride, 255);
 }
 
 fn scalar64(
@@ -644,7 +671,7 @@ fn scalar64(
     stride: usize,
     max: i32,
 ) {
-    inverse_add_n::<S64>(coefs, n, tx_type, lossless, dst, stride, max);
+    S64::inverse_add(coefs, n, tx_type, lossless, dst, stride, max);
 }
 
 /// The value every sample of a DCT_DCT block with only a DC coefficient
@@ -1354,7 +1381,7 @@ mod tests {
             {
                 b[0] = dc;
                 let mut want = vec![128u16; n0 * n0];
-                inverse_add_n::<S32>(&b, n, DCT_DCT, false, &mut want, n0, 255);
+                S32::inverse_add(&b, n, DCT_DCT, false, &mut want, n0, 255);
                 let mut got = vec![128u16; n0 * n0];
                 inverse_transform_add(Level::Scalar, &b, n, DCT_DCT, false, 1, 8, &mut got, n0);
                 assert_eq!(got, want, "n={n} dc={dc}");
