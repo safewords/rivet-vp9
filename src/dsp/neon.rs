@@ -538,3 +538,32 @@ pub(crate) fn itx64(
 ) {
     V64x2::inverse_add(coefs, n, tx_type, lossless, dst, stride, max);
 }
+
+/// [`super::inter::h_scaled_scalar`]: each output's 8 samples times its
+/// own taps, widened and summed across the vector. The caller bounds the
+/// reads.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn h_scaled(
+    src: &[u16],
+    x: i32,
+    x_step: i32,
+    px0: i32,
+    filter: u8,
+    max: i32,
+    out: &mut [u16],
+) {
+    for (c, o) in out.iter_mut().enumerate() {
+        let p = x + x_step * c as i32;
+        let base = ((p >> 4) - 3 - px0) as usize;
+        let t = super::inter::taps(filter, (p & 15) as usize);
+        let s = &src[base..base + 8];
+        // SAFETY: 8 samples and 8 taps, bounds-checked slices.
+        let sum = unsafe {
+            let v = vreinterpretq_s16_u16(vld1q_u16(s.as_ptr()));
+            let k = vld1q_s16(t.as_ptr());
+            let acc = vmull_s16(vget_low_s16(v), vget_low_s16(k));
+            vaddvq_s32(vmlal_s16(acc, vget_high_s16(v), vget_high_s16(k)))
+        };
+        *o = ((sum + 64) >> 7).clamp(0, max) as u16;
+    }
+}

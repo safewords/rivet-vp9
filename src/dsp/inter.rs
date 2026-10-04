@@ -32,6 +32,10 @@ pub(crate) struct Scratch {
     tmp: Vec<u16>,
     /// A footprint copied out at the reference's edge: up to 71 x 71.
     edge: Vec<u16>,
+    /// Scaled prediction: the footprint, and the horizontal pass's output
+    /// (as large as the steps make them).
+    scaled_src: Vec<u16>,
+    scaled_tmp: Vec<u16>,
 }
 
 impl Scratch {
@@ -39,7 +43,64 @@ impl Scratch {
         Scratch {
             tmp: vec![0; 71 * 64],
             edge: vec![0; 71 * 71],
+            scaled_src: Vec::new(),
+            scaled_tmp: Vec::new(),
         }
+    }
+}
+
+/// The horizontal pass of scaled prediction for one row: `out[c]` is the
+/// filter at position `p = x + x_step * c` (1/16 samples) over
+/// `src[(p >> 4) - 3 - px0..][..8]`, rounded and clamped; the phase, and
+/// so the taps, change from output to output.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn h_scaled_scalar(
+    src: &[u16],
+    x: i32,
+    x_step: i32,
+    px0: i32,
+    filter: u8,
+    max: i32,
+    out: &mut [u16],
+) {
+    let f = &SUBPEL_FILTERS[filter as usize];
+    for (c, o) in out.iter_mut().enumerate() {
+        let p = x + x_step * c as i32;
+        let base = ((p >> 4) - 3 - px0) as usize;
+        let t = &f[(p & 15) as usize];
+        let mut sum = 0;
+        for k in 0..8 {
+            sum += t[k] * src[base + k] as i32;
+        }
+        *o = ((sum + 64) >> 7).clamp(0, max) as u16;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn h_scaled(
+    level: Level,
+    src: &[u16],
+    x: i32,
+    x_step: i32,
+    px0: i32,
+    filter: u8,
+    max: i32,
+    out: &mut [u16],
+) {
+    let w = out.len();
+    // The last output's 8 samples are within `src`.
+    assert!(w > 0 && ((((x + x_step * (w as i32 - 1)) >> 4) - 3 - px0) as usize) + 8 <= src.len());
+    assert!((x >> 4) - 3 >= px0 && x_step > 0);
+    match level {
+        #[cfg(target_arch = "x86_64")]
+        Level::Avx2 | Level::Sse41 if w.is_multiple_of(4) => {
+            // SAFETY: SSE4.1 is present; the asserts bound every 8-sample
+            // read (positions increase with c), and the writes are `out`.
+            unsafe { super::x86::h_scaled_sse41(src, x, x_step, px0, filter, max, out) }
+        }
+        #[cfg(target_arch = "aarch64")]
+        Level::Neon => super::neon::h_scaled(src, x, x_step, px0, filter, max, out),
+        _ => h_scaled_scalar(src, x, x_step, px0, filter, max, out),
     }
 }
 
@@ -290,36 +351,46 @@ pub(crate) fn predict(
         }
         return;
     }
-    let taps = &SUBPEL_FILTERS[filter as usize];
+    // Scaled: the footprint with the edge repeated (the specification's
+    // clamped coordinates), a horizontal pass whose phase changes per
+    // output, and a vertical pass whose phase changes per row.
     let ih = ((((h as i32 - 1) * y_step + 15) >> 4) + 8) as usize;
-    let mut inter = vec![0i32; ih * w];
-    // The general case, exactly as written.
+    let px0 = x0;
+    let fw = (((x + x_step * (w as i32 - 1)) >> 4) + 5 - px0) as usize;
+    scratch.scaled_src.resize(ih * fw, 0);
+    scratch.scaled_tmp.resize(ih * w, 0);
     for row in 0..ih {
         let ry = (y0 + row as i32).clamp(0, r.last_y) as usize;
         let src = &r.data[ry * r.stride..];
-        for c in 0..w {
-            let p = x + x_step * c as i32;
-            let f = &taps[(p & 15) as usize];
-            let px = (p >> 4) - 3;
-            let mut sum = 0;
-            for t in 0..8 {
-                let sx = (px + t as i32).clamp(0, r.last_x) as usize;
-                sum += f[t] * src[sx] as i32;
-            }
-            inter[row * w + c] = ((sum + 64) >> 7).clamp(0, max);
+        let e = &mut scratch.scaled_src[row * fw..row * fw + fw];
+        for (c, v) in e.iter_mut().enumerate() {
+            *v = src[(px0 + c as i32).clamp(0, r.last_x) as usize];
         }
+        h_scaled(
+            level,
+            &scratch.scaled_src[row * fw..row * fw + fw],
+            x,
+            x_step,
+            px0,
+            filter,
+            max,
+            &mut scratch.scaled_tmp[row * w..row * w + w],
+        );
     }
     for rr in 0..h {
         let p = (y & 15) + y_step * rr as i32;
-        let f = &taps[(p & 15) as usize];
         let base = (p >> 4) as usize;
-        for c in 0..w {
-            let mut sum = 0;
-            for t in 0..8 {
-                sum += f[t] * inter[(base + t) * w + c];
-            }
-            out[rr * out_stride + c] = ((sum + 64) >> 7).clamp(0, max) as u16;
-        }
+        v_pass(
+            level,
+            &scratch.scaled_tmp[base * w..],
+            w,
+            1,
+            w,
+            &taps(filter, (p & 15) as usize),
+            max,
+            &mut out[rr * out_stride..],
+            out_stride,
+        );
     }
 }
 
@@ -466,8 +537,8 @@ mod tests {
                     } else {
                         y
                     };
-                    let step = if iter % 8 == 7 {
-                        (rng.range(8, 32) as i32, rng.range(8, 32) as i32)
+                    let step = if iter % 4 == 3 {
+                        (rng.range(1, 32) as i32, rng.range(1, 32) as i32)
                     } else {
                         (16, 16)
                     };

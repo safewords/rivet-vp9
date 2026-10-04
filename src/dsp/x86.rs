@@ -1116,3 +1116,36 @@ pub(crate) unsafe fn itx64_avx2(
 ) {
     V64x4::inverse_add(coefs, n, tx_type, lossless, dst, stride, max);
 }
+
+/// [`super::inter::h_scaled_scalar`] with SSE4.1, four outputs at a time:
+/// each output's 8 samples times its own taps (pmaddwd), summed across the
+/// vector. `out.len()` a multiple of 4; the caller bounds the reads.
+#[target_feature(enable = "sse4.1")]
+pub(crate) unsafe fn h_scaled_sse41(
+    src: &[u16],
+    x: i32,
+    x_step: i32,
+    px0: i32,
+    filter: u8,
+    max: i32,
+    out: &mut [u16],
+) {
+    let mx = _mm_set1_epi32(max);
+    let w = out.len();
+    let one = |c: usize| {
+        let p = x + x_step * c as i32;
+        let base = ((p >> 4) - 3 - px0) as usize;
+        let t = super::inter::taps(filter, (p & 15) as usize);
+        let s = _mm_loadu_si128(src.as_ptr().add(base) as *const __m128i);
+        _mm_madd_epi16(s, _mm_loadu_si128(t.as_ptr() as *const __m128i))
+    };
+    for c in (0..w).step_by(4) {
+        let a = _mm_hadd_epi32(one(c), one(c + 1));
+        let b = _mm_hadd_epi32(one(c + 2), one(c + 3));
+        let v = round_clamp_128(_mm_hadd_epi32(a, b), mx);
+        _mm_storel_epi64(
+            out.as_mut_ptr().add(c) as *mut __m128i,
+            _mm_packus_epi32(v, v),
+        );
+    }
+}

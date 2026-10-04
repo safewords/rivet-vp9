@@ -88,6 +88,29 @@ fn kernel_bench() {
         let v = best(|| f(simd));
         row(&format!("8-tap h+v {w}x{w}"), s, v);
     }
+    for w in [8usize, 64] {
+        let mut out = vec![0u16; w * w];
+        let mut f = |l: Level| {
+            inter::predict(
+                l,
+                &mut sc,
+                &r,
+                50 * 16 + 5,
+                60 * 16 + 9,
+                24,
+                21,
+                w,
+                w,
+                0,
+                8,
+                &mut out,
+                w,
+            )
+        };
+        let s = best(|| f(Level::Scalar));
+        let v = best(|| f(simd));
+        row(&format!("8-tap scaled (3:2) {w}x{w}"), s, v);
+    }
     // Loop filter: one superblock pass, every run filtered.
     let pic: Vec<u16> = (0..96 * 96).map(|i| 100 + ((i / 7) % 3) as u16).collect();
     let mut e = lf::Edges::new();
