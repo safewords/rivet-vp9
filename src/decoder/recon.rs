@@ -242,14 +242,18 @@ impl FrameDec<'_> {
         };
         let dc_q = DC_QLOOKUP[bd_idx][(q + dc_delta).clamp(0, 255) as usize] as i64;
         let ac_q = AC_QLOOKUP[bd_idx][(q + ac_delta).clamp(0, 255) as usize] as i64;
-        let dq_denom = if tx_sz == TX_32X32 { 2 } else { 1 };
         let n = 2 + tx_sz as u32;
         let n0 = 1usize << n;
+        // Only the first `eob` positions of the scan can be nonzero.
+        let scan = &super::block::scan(tx_sz, tx_type)[..eob];
         let block = &mut self.coefs[..n0 * n0];
-        for (k, v) in block.iter_mut().enumerate() {
+        for &p in scan {
+            let v = &mut block[p as usize];
             if *v != 0 {
-                let qq = if k == 0 { dc_q } else { ac_q };
-                *v = ((*v as i64 * qq) / dq_denom).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+                let qq = if p == 0 { dc_q } else { ac_q };
+                let d = *v as i64 * qq;
+                let d = if tx_sz == TX_32X32 { d / 2 } else { d };
+                *v = d.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
             }
         }
         let buf = &mut self.planes[plane];
@@ -265,7 +269,9 @@ impl FrameDec<'_> {
             &mut buf.data[at..],
             stride,
         );
-        block.iter_mut().for_each(|v| *v = 0);
+        for &p in scan {
+            block[p as usize] = 0;
+        }
     }
 }
 

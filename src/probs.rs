@@ -112,7 +112,7 @@ pub(crate) struct Counts {
 }
 
 /// Element-wise addition of counts.
-trait Accumulate {
+pub(crate) trait Accumulate {
     fn accumulate(&mut self, o: &Self);
 }
 

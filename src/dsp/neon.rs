@@ -341,3 +341,120 @@ impl super::lf::V16 for V16x8 {
         }
     }
 }
+
+/// [`crate::encoder::fdct::forward_scalar`]: the two 16-bit matrix
+/// products with widening multiply-accumulates (exact, as the scalar code's
+/// 32-bit sums).
+pub(crate) fn fdct(t: &crate::encoder::fdct::Fwd2d, res: &[i16], out: &mut [i32]) {
+    let n0 = t.fc.n0;
+    assert!(res.len() >= n0 * n0 && out.len() >= n0 * n0);
+    assert!(t.fc.q.len() >= n0 * n0 && t.fr.qt.len() >= n0 * n0);
+    let mut u = [0i16; 32 * 32];
+    // SAFETY: every load and store is within the asserted lengths (rows of
+    // n0 values, in chunks of 4 or 8 that divide n0).
+    unsafe {
+        let rnd = vdupq_n_s32(1 << (t.shift1 - 1));
+        let sh = vdupq_n_s32(-(t.shift1 as i32));
+        let rp = res.as_ptr();
+        for f in 0..n0 {
+            let fc = &t.fc.q[f * n0..f * n0 + n0];
+            for c in (0..n0).step_by(4) {
+                let mut acc = rnd;
+                for (k, &f) in fc.iter().enumerate() {
+                    acc = vmlal_n_s16(acc, vld1_s16(rp.add(k * n0 + c)), f);
+                }
+                vst1_s16(
+                    u.as_mut_ptr().add(f * n0 + c),
+                    vqmovn_s32(vshlq_s32(acc, sh)),
+                );
+            }
+        }
+        let qt = t.fr.qt.as_ptr();
+        for f in 0..n0 {
+            for g in (0..n0).step_by(4) {
+                let mut acc = vdupq_n_s32(0);
+                for j in 0..n0 {
+                    acc = vmlal_n_s16(acc, vld1_s16(qt.add(j * n0 + g)), u[f * n0 + j]);
+                }
+                vst1q_s32(out.as_mut_ptr().add(f * n0 + g), acc);
+            }
+        }
+    }
+}
+
+/// [`super::pixel::sse_scalar`], `w` at least 8.
+pub(crate) fn sse(a: &[u16], sa: usize, b: &[u16], sb: usize, w: usize, h: usize) -> u64 {
+    assert!(a.len() >= (h - 1) * sa + w && b.len() >= (h - 1) * sb + w);
+    let w8 = w & !7;
+    let mut tail = 0u64;
+    // SAFETY: reads within the asserted rows.
+    unsafe {
+        let mut total = vdupq_n_u64(0);
+        for i in 0..h {
+            let (pa, pb) = (a.as_ptr().add(i * sa), b.as_ptr().add(i * sb));
+            for c in (0..w8).step_by(8) {
+                let d = vabdq_u16(vld1q_u16(pa.add(c)), vld1q_u16(pb.add(c)));
+                let lo = vmull_u16(vget_low_u16(d), vget_low_u16(d));
+                let hi = vmull_u16(vget_high_u16(d), vget_high_u16(d));
+                total = vpadalq_u32(total, lo);
+                total = vpadalq_u32(total, hi);
+            }
+            for c in w8..w {
+                let d = *pa.add(c) as i64 - *pb.add(c) as i64;
+                tail += (d * d) as u64;
+            }
+        }
+        vaddvq_u64(total) + tail
+    }
+}
+
+/// [`super::pixel::sad_scalar`], `w` at least 8.
+pub(crate) fn sad(a: &[u16], sa: usize, b: &[u16], sb: usize, w: usize, h: usize) -> u64 {
+    assert!(a.len() >= (h - 1) * sa + w && b.len() >= (h - 1) * sb + w);
+    let w8 = w & !7;
+    let mut tail = 0u64;
+    // SAFETY: reads within the asserted rows.
+    unsafe {
+        let mut total = vdupq_n_u64(0);
+        for i in 0..h {
+            let (pa, pb) = (a.as_ptr().add(i * sa), b.as_ptr().add(i * sb));
+            let mut row = vdupq_n_u32(0);
+            for c in (0..w8).step_by(8) {
+                let d = vabdq_u16(vld1q_u16(pa.add(c)), vld1q_u16(pb.add(c)));
+                row = vpadalq_u16(row, d);
+            }
+            total = vpadalq_u32(total, row);
+            for c in w8..w {
+                tail += (*pa.add(c) as i32 - *pb.add(c) as i32).unsigned_abs() as u64;
+            }
+        }
+        vaddvq_u64(total) + tail
+    }
+}
+
+/// [`crate::encoder::fdct::quantize_scalar`]: four at a time, the same
+/// single-precision operations (separate multiply and add).
+pub(crate) fn quantize(d: &[i32], scale: f32, bias: f32, max_coef: i32, out: &mut [i32]) {
+    let len = d.len().min(out.len());
+    let len4 = len & !3;
+    // SAFETY: loads and stores below `len4`, within both slices.
+    unsafe {
+        let sc = vdupq_n_f32(scale);
+        let bi = vdupq_n_f32(bias);
+        let mx = vdupq_n_s32(max_coef);
+        for i in (0..len4).step_by(4) {
+            let v = vld1q_s32(d.as_ptr().add(i));
+            let t = vaddq_f32(vmulq_f32(vcvtq_f32_s32(vabsq_s32(v)), sc), bi);
+            let l = vminq_s32(vcvtq_s32_f32(t), mx);
+            let neg = vcltq_s32(v, vdupq_n_s32(0));
+            vst1q_s32(out.as_mut_ptr().add(i), vbslq_s32(neg, vnegq_s32(l), l));
+        }
+    }
+    crate::encoder::fdct::quantize_scalar(
+        &d[len4..len],
+        scale,
+        bias,
+        max_coef,
+        &mut out[len4..len],
+    );
+}

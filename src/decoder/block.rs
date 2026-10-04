@@ -1268,18 +1268,7 @@ impl<'a> FrameDec<'a> {
     ) -> (usize, u8) {
         let seg_eob = 16usize << (tx_sz << 1);
         let tx_type = self.tx_type(plane, tx_sz, block_idx);
-        let scan: &[u16] = match (tx_sz, tx_type) {
-            (TX_4X4, ADST_DCT) => &ROW_SCAN_4X4,
-            (TX_4X4, DCT_ADST) => &COL_SCAN_4X4,
-            (TX_4X4, _) => &DEFAULT_SCAN_4X4,
-            (TX_8X8, ADST_DCT) => &ROW_SCAN_8X8,
-            (TX_8X8, DCT_ADST) => &COL_SCAN_8X8,
-            (TX_8X8, _) => &DEFAULT_SCAN_8X8,
-            (TX_16X16, ADST_DCT) => &ROW_SCAN_16X16,
-            (TX_16X16, DCT_ADST) => &COL_SCAN_16X16,
-            (TX_16X16, _) => &DEFAULT_SCAN_16X16,
-            _ => &DEFAULT_SCAN_32X32,
-        };
+        let scan = scan(tx_sz, tx_type);
         let ref_type = self.b.is_inter as usize;
         let ptype = (plane > 0) as usize;
         let txs = tx_sz as usize;
@@ -1379,6 +1368,22 @@ fn read_coef(d: &mut BoolDecoder, token: u8, bit_depth: u32) -> i32 {
         coef += bit << (num_extra - 1 - e);
     }
     coef
+}
+
+/// The scan order of get_scan (6.4.25).
+pub(crate) fn scan(tx_sz: u8, tx_type: u8) -> &'static [u16] {
+    match (tx_sz, tx_type) {
+        (TX_4X4, ADST_DCT) => &ROW_SCAN_4X4,
+        (TX_4X4, DCT_ADST) => &COL_SCAN_4X4,
+        (TX_4X4, _) => &DEFAULT_SCAN_4X4,
+        (TX_8X8, ADST_DCT) => &ROW_SCAN_8X8,
+        (TX_8X8, DCT_ADST) => &COL_SCAN_8X8,
+        (TX_8X8, _) => &DEFAULT_SCAN_8X8,
+        (TX_16X16, ADST_DCT) => &ROW_SCAN_16X16,
+        (TX_16X16, DCT_ADST) => &COL_SCAN_16X16,
+        (TX_16X16, _) => &DEFAULT_SCAN_16X16,
+        _ => &DEFAULT_SCAN_32X32,
+    }
 }
 
 /// One tile of a frame's tile data.
@@ -1520,7 +1525,24 @@ pub(crate) fn decode_tiles_parallel(
     if let Some(e) = size_err {
         return Err(e);
     }
-    // Assemble the frame.
+    let mut counts = Box::<Counts>::default();
+    let mut padding_ok = true;
+    let mut parts = Vec::with_capacity(ok.len());
+    for (col, (cplanes, cmi, ccounts, cpad)) in ok {
+        counts.add(&ccounts);
+        padding_ok &= cpad;
+        parts.push((col, cplanes, cmi));
+    }
+    let (planes, mi) = assemble(h, parts);
+    Ok((planes, mi, counts, padding_ok))
+}
+
+/// The frame's planes and mode info from those of its tile columns
+/// (`FrameDec::new_columns`'s), each with its tile column index.
+pub(crate) fn assemble(
+    h: &FrameHeader,
+    columns: Vec<(u32, [PlaneBuf; 3], Vec<MiInfo>)>,
+) -> ([PlaneBuf; 3], Vec<MiInfo>) {
     let w = (h.sb64_cols * 64) as usize;
     let ht = (h.sb64_rows * 64) as usize;
     let (sx, sy) = (h.subsampling_x as usize, h.subsampling_y as usize);
@@ -1530,9 +1552,7 @@ pub(crate) fn decode_tiles_parallel(
         PlaneBuf::new(w >> sx, ht >> sy),
     ];
     let mut mi = vec![MiInfo::default(); (h.mi_rows * h.mi_cols) as usize];
-    let mut counts = Box::<Counts>::default();
-    let mut padding_ok = true;
-    for (col, (cplanes, cmi, ccounts, cpad)) in ok {
+    for (col, cplanes, cmi) in columns {
         for (dst, src) in planes.iter_mut().zip(&cplanes) {
             let cw = src.stride;
             for (drow, srow) in dst
@@ -1554,10 +1574,8 @@ pub(crate) fn decode_tiles_parallel(
                 drow[start..end].copy_from_slice(srow);
             }
         }
-        counts.add(&ccounts);
-        padding_ok &= cpad;
     }
-    Ok((planes, mi, counts, padding_ok))
+    (planes, mi)
 }
 
 /// get_tile_offset (6.4.1).

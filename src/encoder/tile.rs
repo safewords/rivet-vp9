@@ -21,7 +21,7 @@ use crate::bool_coder::{BitCounter, BoolEncoder, Sink};
 use crate::consts::*;
 use crate::decoder::block::{Block, Mv, pareto};
 use crate::decoder::{FrameDec, MiInfo, RefFrame};
-use crate::dsp::inter;
+use crate::dsp::{inter, pixel};
 use crate::frame::Frame;
 use crate::header::FrameHeader;
 use crate::tables::*;
@@ -64,15 +64,33 @@ impl Source {
 }
 
 /// One coded transform block.
-struct TxBlock {
-    coefs: Vec<i32>,
+struct TxBlock<'a> {
+    coefs: &'a [i32],
     tx_type: u8,
     eob: usize,
 }
 
 /// The transform blocks of one plane of a block, in syntax order; `None`
-/// for those outside the frame.
-type PlaneCoding = Vec<Option<TxBlock>>;
+/// for those outside the frame. Their coefficients are kept one after the
+/// other.
+#[derive(Default)]
+struct PlaneCoding {
+    /// (offset in `coefs`, size, tx_type, eob).
+    blocks: Vec<Option<(usize, usize, u8, usize)>>,
+    coefs: Vec<i32>,
+}
+
+impl PlaneCoding {
+    fn iter(&self) -> impl Iterator<Item = Option<TxBlock<'_>>> {
+        self.blocks.iter().map(|b| {
+            b.map(|(off, len, tx_type, eob)| TxBlock {
+                coefs: &self.coefs[off..off + len],
+                tx_type,
+                eob,
+            })
+        })
+    }
+}
 
 /// What a block is coded with.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,7 +145,7 @@ pub(crate) struct TileEncoder<'a> {
     src: &'a Source,
     /// The references searched (LAST, then GOLDEN when it is another
     /// picture): the frame, and its luma padded for whole-pixel search.
-    refs: Vec<SearchRef<'a>>,
+    refs: &'a [SearchRef<'a>],
     pad_stride: usize,
     /// Rate-distortion multiplier (squared error per bit).
     lambda: f64,
@@ -146,11 +164,39 @@ pub(crate) struct TileEncoder<'a> {
     scratch: std::cell::RefCell<inter::Scratch>,
 }
 
-/// A reference frame the motion search looks in.
-struct SearchRef<'a> {
+/// A reference frame the motion search looks in: the frame, and its luma
+/// padded by [`PAD`] for whole-pixel search (row stride `stride`).
+pub(crate) struct SearchRef<'a> {
     ref_frame: i8,
     frame: &'a RefFrame,
     padded: Vec<u16>,
+    stride: usize,
+}
+
+impl<'a> SearchRef<'a> {
+    /// `r`, padded: built once per frame, shared by every tile.
+    pub(crate) fn new(h: &FrameHeader, ref_frame: i8, r: &'a RefFrame) -> Self {
+        let ps = (h.sb64_cols * 64) as usize + 2 * PAD;
+        let rows = (h.sb64_rows * 64) as usize + 2 * PAD;
+        let w = r.width as usize;
+        let ht = r.height as usize;
+        let rp = &r.planes[0];
+        let mut v = Vec::with_capacity(ps * rows);
+        for y in 0..rows {
+            let sy = (y as isize - PAD as isize).clamp(0, ht as isize - 1) as usize;
+            let row = &rp.data[sy * rp.stride..sy * rp.stride + w];
+            v.resize(v.len() + PAD, row[0]);
+            v.extend_from_slice(row);
+            let right = ps - PAD - w;
+            v.resize(v.len() + right, row[w - 1]);
+        }
+        SearchRef {
+            ref_frame,
+            frame: r,
+            padded: v,
+            stride: ps,
+        }
+    }
 }
 
 /// `[txSz][plane > 0][is_inter][band][ctx][node][bit]`.
@@ -180,7 +226,7 @@ impl<'a> TileEncoder<'a> {
         cfg: &'a Config,
         h: &'a FrameHeader,
         src: &'a Source,
-        refs: &[(i8, &'a RefFrame)],
+        refs: &'a [SearchRef<'a>],
     ) -> Self {
         // The quantiser step of the frame's bit depth: at 10 and 12 bits it
         // is about 4 and 16 times the 8-bit step, so the multiplier (squared
@@ -209,7 +255,7 @@ impl<'a> TileEncoder<'a> {
             cfg,
             h,
             src,
-            refs: Vec::new(),
+            refs,
             pad_stride: 0,
             lambda,
             effort,
@@ -220,27 +266,7 @@ impl<'a> TileEncoder<'a> {
             level: crate::dsp::level(),
             scratch: std::cell::RefCell::new(inter::Scratch::new()),
         };
-        let ps = (h.sb64_cols * 64) as usize + 2 * PAD;
-        let rows = (h.sb64_rows * 64) as usize + 2 * PAD;
-        te.pad_stride = ps;
-        for &(ref_frame, r) in refs {
-            let w = r.width as usize;
-            let ht = r.height as usize;
-            let mut v = vec![0u16; ps * rows];
-            let rp = &r.planes[0];
-            for y in 0..rows {
-                let sy = (y as isize - PAD as isize).clamp(0, ht as isize - 1) as usize;
-                for x in 0..ps {
-                    let sx = (x as isize - PAD as isize).clamp(0, w as isize - 1) as usize;
-                    v[y * ps + x] = rp.data[sy * rp.stride + sx];
-                }
-            }
-            te.refs.push(SearchRef {
-                ref_frame,
-                frame: r,
-                padded: v,
-            });
-        }
+        te.pad_stride = refs.first().map_or(0, |r| r.stride);
         te
     }
 
@@ -263,60 +289,51 @@ impl<'a> TileEncoder<'a> {
                 != BLOCK_INVALID
     }
 
-    pub(crate) fn encode_tiles(&mut self, fd: &mut FrameDec) -> Vec<u8> {
+    /// Codes tile column `tile_col` (every tile row: the encoder codes one)
+    /// into `fd`, a decoder over that column's samples and mode info.
+    /// Returns the tile's data.
+    pub(crate) fn encode_column(&mut self, fd: &mut FrameDec, tile_col: u32) -> Vec<u8> {
         let h = self.h;
-        let tile_cols = 1u32 << h.tile_cols_log2;
         for p in fd.above_nonzero.iter_mut() {
             p.iter_mut().for_each(|v| *v = 0);
         }
         fd.above_partition.iter_mut().for_each(|v| *v = 0);
         fd.above_seg_pred.iter_mut().for_each(|v| *v = 0);
         let search = self.replay.is_none() && self.effort.partition;
-        let mut out = Vec::new();
-        for tile_col in 0..tile_cols {
-            let off = |n: u32| {
-                let sbs = h.mi_cols.div_ceil(8);
-                (((n * sbs) >> h.tile_cols_log2) << 3).min(h.mi_cols)
-            };
-            fd.mi_row_start = 0;
-            fd.mi_row_end = h.mi_rows;
-            fd.mi_col_start = off(tile_col);
-            fd.mi_col_end = off(tile_col + 1);
-            let mut e = BoolEncoder::new();
-            let mut r = 0;
-            while r < h.mi_rows {
-                for p in fd.left_nonzero.iter_mut() {
-                    p.iter_mut().for_each(|v| *v = 0);
-                }
-                fd.left_partition.iter_mut().for_each(|v| *v = 0);
-                fd.left_seg_pred.iter_mut().for_each(|v| *v = 0);
-                let mut c = fd.mi_col_start;
-                while c < fd.mi_col_end {
-                    if search {
-                        // Search, put the superblock back as it was, and
-                        // code the winner.
-                        let pre = self.snapshot(fd, r, c, 8, 8);
-                        self.record = false;
-                        let (_, decs) = self.search(fd, r, c, BLOCK_64X64);
-                        self.record = true;
-                        self.restore(fd, &pre);
-                        self.replay = Some((decs, 0));
-                        self.partition(&mut e, fd, r, c, BLOCK_64X64, None);
-                        self.replay = None;
-                    } else {
-                        self.partition(&mut e, fd, r, c, BLOCK_64X64, None);
-                    }
-                    c += 8;
-                }
-                r += 8;
+        let (start, end) = column_bounds(h, tile_col);
+        fd.mi_row_start = 0;
+        fd.mi_row_end = h.mi_rows;
+        fd.mi_col_start = start;
+        fd.mi_col_end = end;
+        let mut e = BoolEncoder::new();
+        let mut r = 0;
+        while r < h.mi_rows {
+            for p in fd.left_nonzero.iter_mut() {
+                p.iter_mut().for_each(|v| *v = 0);
             }
-            let data = e.finish();
-            if tile_col + 1 < tile_cols {
-                out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            fd.left_partition.iter_mut().for_each(|v| *v = 0);
+            fd.left_seg_pred.iter_mut().for_each(|v| *v = 0);
+            let mut c = fd.mi_col_start;
+            while c < fd.mi_col_end {
+                if search {
+                    // Search, put the superblock back as it was, and
+                    // code the winner.
+                    let pre = self.snapshot(fd, r, c, 8, 8);
+                    self.record = false;
+                    let (_, decs) = self.search(fd, r, c, BLOCK_64X64);
+                    self.record = true;
+                    self.restore(fd, &pre);
+                    self.replay = Some((decs, 0));
+                    self.partition(&mut e, fd, r, c, BLOCK_64X64, None);
+                    self.replay = None;
+                } else {
+                    self.partition(&mut e, fd, r, c, BLOCK_64X64, None);
+                }
+                c += 8;
             }
-            out.extend_from_slice(&data);
+            r += 8;
         }
-        out
+        e.finish()
     }
 
     fn target_size(&self) -> u8 {
@@ -359,7 +376,8 @@ impl<'a> TileEncoder<'a> {
             let b = &fd.planes[p];
             let mut v = Vec::with_capacity(w * h);
             for i in 0..h {
-                v.extend_from_slice(&b.data[(y + i) * b.stride + x..(y + i) * b.stride + x + w]);
+                let at = b.at(x, y + i);
+                v.extend_from_slice(&b.data[at..at + w]);
             }
             planes[p] = v;
             above_nz[p] = fd.above_nonzero[p][x >> 2..(x + w).div_ceil(4)].to_vec();
@@ -390,8 +408,8 @@ impl<'a> TileEncoder<'a> {
             let [x, y, w, h] = self.region(p, s.r, s.c, s.bw8, s.bh8);
             let b = &mut fd.planes[p];
             for i in 0..h {
-                b.data[(y + i) * b.stride + x..(y + i) * b.stride + x + w]
-                    .copy_from_slice(&s.planes[p][i * w..(i + 1) * w]);
+                let at = b.at(x, y + i);
+                b.data[at..at + w].copy_from_slice(&s.planes[p][i * w..(i + 1) * w]);
             }
             fd.above_nonzero[p][x >> 2..(x + w).div_ceil(4)].copy_from_slice(&s.above_nz[p]);
             fd.left_nonzero[p][y >> 2..(y + h).div_ceil(4)].copy_from_slice(&s.left_nz[p]);
@@ -399,7 +417,8 @@ impl<'a> TileEncoder<'a> {
         let mut k = 0;
         for y in s.r..(s.r + s.bh8).min(self.h.mi_rows) {
             for x in s.c..(s.c + s.bw8).min(self.h.mi_cols) {
-                fd.mi[(y * self.h.mi_cols + x) as usize] = s.mi[k];
+                let at = fd.mi_idx(y, x);
+                fd.mi[at] = s.mi[k];
                 k += 1;
             }
         }
@@ -422,19 +441,20 @@ impl<'a> TileEncoder<'a> {
         let (sx, sy) = self.ss(plane);
         let max_x = ((self.h.width as usize + sx) >> sx).min(x + w);
         let max_y = ((self.h.height as usize + sy) >> sy).min(y + h);
-        let b = &fd.planes[plane];
-        let s = &self.src.planes[plane];
-        let ss = self.src.stride[plane];
-        let mut acc = 0u64;
-        for yy in y..max_y {
-            let br = &b.data[yy * b.stride..];
-            let sr = &s[yy * ss..];
-            for xx in x..max_x {
-                let d = br[xx] as i64 - sr[xx] as i64;
-                acc += (d * d) as u64;
-            }
+        if max_x <= x || max_y <= y {
+            return 0.0;
         }
-        acc as f64
+        let b = &fd.planes[plane];
+        let ss = self.src.stride[plane];
+        pixel::sse(
+            self.level,
+            &b.data[b.at(x, y)..],
+            b.stride,
+            &self.src.planes[plane][y * ss + x..],
+            ss,
+            max_x - x,
+            max_y - y,
+        ) as f64
     }
 
     // -----------------------------------------------------------------
@@ -666,7 +686,8 @@ impl<'a> TileEncoder<'a> {
         let b = &fd.planes[plane];
         let mut v = Vec::with_capacity(w * h);
         for i in 0..h {
-            v.extend_from_slice(&b.data[(y + i) * b.stride + x..(y + i) * b.stride + x + w]);
+            let at = b.at(x, y + i);
+            v.extend_from_slice(&b.data[at..at + w]);
         }
         v
     }
@@ -675,8 +696,8 @@ impl<'a> TileEncoder<'a> {
         let (x, y, w, h, _) = self.plane_region(fd, plane);
         let b = &mut fd.planes[plane];
         for i in 0..h {
-            b.data[(y + i) * b.stride + x..(y + i) * b.stride + x + w]
-                .copy_from_slice(&saved[i * w..(i + 1) * w]);
+            let at = b.at(x, y + i);
+            b.data[at..at + w].copy_from_slice(&saved[i * w..(i + 1) * w]);
         }
     }
 
@@ -707,14 +728,15 @@ impl<'a> TileEncoder<'a> {
         let n = 2 + tx_sz as u32;
         let n0 = 1usize << n;
         let q = fd_q(h, plane);
-        let dq_denom = if tx_sz == TX_32X32 { 2.0 } else { 1.0 };
+        let dq_denom = if tx_sz == TX_32X32 { 2 } else { 1 };
         // The largest magnitude a token can carry: category 6 has 14 extra
         // bits, plus BitDepth - 8 high bits above 8 bits.
         let max_coef = 67 + (1i32 << (14 + h.bit_depth - 8)) - 1;
-        let mut out = Vec::new();
+        let mut out = PlaneCoding::default();
         let mut bits = 0.0;
         let mut block_idx = 0;
-        let mut res = vec![0i32; n0 * n0];
+        let mut res = [0i16; 32 * 32];
+        let mut d = [0i32; 32 * 32];
         let mut y = 0;
         while y < n4h {
             let mut x = 0;
@@ -740,54 +762,35 @@ impl<'a> TileEncoder<'a> {
                         let s = &self.src.planes[plane];
                         let ss = self.src.stride[plane];
                         for i in 0..n0 {
-                            for j in 0..n0 {
-                                res[i * n0 + j] = s[(start_y + i) * ss + start_x + j] as i32
-                                    - b.data[(start_y + i) * b.stride + start_x + j] as i32;
+                            let sr = &s[(start_y + i) * ss + start_x..][..n0];
+                            let br = &b.data[b.at(start_x, start_y + i)..][..n0];
+                            for ((r, &a), &p) in res[i * n0..i * n0 + n0].iter_mut().zip(sr).zip(br)
+                            {
+                                *r = (a as i32 - p as i32) as i16;
                             }
                         }
                     }
-                    let coefs: Vec<i32> = if h.lossless {
-                        fdct::forward_wht(&res).to_vec()
+                    let off = out.coefs.len();
+                    out.coefs.resize(off + n0 * n0, 0);
+                    let coefs = &mut out.coefs[off..];
+                    if h.lossless {
+                        coefs.copy_from_slice(&fdct::forward_wht(&res));
                     } else {
-                        let d = fdct::forward_2d(&res, n, tx_type);
-                        d.iter()
-                            .enumerate()
-                            .map(|(k, &v)| {
-                                let qq = if k == 0 { q.0 } else { q.1 } as f64;
-                                let t = v.abs() * dq_denom / qq;
-                                let bias = if k == 0 { 0.5 } else { 0.38 };
-                                let l = ((t + bias).floor() as i32).min(max_coef);
-                                if v < 0.0 { -l } else { l }
-                            })
-                            .collect()
-                    };
+                        let k = fdct::forward(self.level, &res, n, tx_type, h.bit_depth, &mut d);
+                        fdct::quantize(self.level, &d[..n0 * n0], k, q, dq_denom, max_coef, coefs);
+                    }
                     let scan = scan_for(tx_sz, tx_type);
-                    let eob = scan
-                        .iter()
-                        .rposition(|&p| coefs[p as usize] != 0)
-                        .map_or(0, |i| i + 1);
+                    let eob = eob_of(scan, coefs);
                     if eob > 0 {
-                        fd.coefs[..n0 * n0].copy_from_slice(&coefs);
+                        fd.coefs[..n0 * n0].copy_from_slice(coefs);
                         fd.reconstruct(plane, start_x, start_y, tx_sz, tx_type, eob);
-                        bits += 2.0;
-                        for &p in &scan[..eob] {
-                            let v = coefs[p as usize];
-                            bits += if v == 0 {
-                                1.5
-                            } else {
-                                3.0 + 2.0 * (1.0 + v.unsigned_abs() as f64).log2()
-                            };
-                        }
+                        bits += 2.0 + bits_of(&scan[..eob], coefs);
                     } else {
                         bits += 1.0;
                     }
-                    out.push(Some(TxBlock {
-                        coefs,
-                        tx_type,
-                        eob,
-                    }));
+                    out.blocks.push(Some((off, n0 * n0, tx_type, eob)));
                 } else {
-                    out.push(None);
+                    out.blocks.push(None);
                 }
                 block_idx += 1;
                 x += step;
@@ -884,20 +887,18 @@ impl<'a> TileEncoder<'a> {
     ) -> u64 {
         let x0 = (fd.b.mi_col * 8) as isize + mv_col_px as isize + PAD as isize;
         let y0 = (fd.b.mi_row * 8) as isize + mv_row_px as isize + PAD as isize;
-        let s = &self.src.planes[0];
         let ss = self.src.stride[0];
         let bx = (fd.b.mi_col * 8) as usize;
         let by = (fd.b.mi_row * 8) as usize;
-        let mut acc = 0u64;
-        for i in 0..h {
-            let ry = (y0 + i as isize) as usize;
-            let row = &self.refs[ri].padded[ry * self.pad_stride + x0 as usize..];
-            let srow = &s[(by + i) * ss + bx..];
-            for j in 0..w {
-                acc += (row[j] as i32 - srow[j] as i32).unsigned_abs() as u64;
-            }
-        }
-        acc
+        pixel::sad(
+            self.level,
+            &self.refs[ri].padded[y0 as usize * self.pad_stride + x0 as usize..],
+            self.pad_stride,
+            &self.src.planes[0][by * ss + bx..],
+            ss,
+            w,
+            h,
+        )
     }
 
     /// SAD of the luma prediction with `mv` (1/8 units) — the decoder's
@@ -937,18 +938,18 @@ impl<'a> TileEncoder<'a> {
             &mut buf[..w * h],
             w,
         );
-        let s = &self.src.planes[0];
         let ss = self.src.stride[0];
         let bx = (fd.b.mi_col * 8) as usize;
         let by = (fd.b.mi_row * 8) as usize;
-        let mut acc = 0u64;
-        for i in 0..h {
-            for j in 0..w {
-                acc += (buf[i * w + j] as i32 - s[(by + i) * ss + bx + j] as i32).unsigned_abs()
-                    as u64;
-            }
-        }
-        acc
+        pixel::sad(
+            self.level,
+            &buf[..w * h],
+            w,
+            &self.src.planes[0][by * ss + bx..],
+            ss,
+            w,
+            h,
+        )
     }
 
     /// The range of motion vectors (1/8 units, even) the decoder will not
@@ -1246,7 +1247,7 @@ impl<'a> TileEncoder<'a> {
         };
         let skip = codings
             .iter()
-            .all(|p| p.iter().all(|t| t.as_ref().is_none_or(|t| t.eob == 0)));
+            .all(|p| p.iter().all(|t| t.is_none_or(|t| t.eob == 0)));
         fd.b.skip = skip;
         let avail_u = fd.b.avail_u;
         let avail_l = fd.b.avail_l;
@@ -1330,7 +1331,7 @@ impl<'a> TileEncoder<'a> {
                     } else {
                         None
                     };
-                    write_tokens(e, fd, stats, plane, start_x, start_y, tx_sz, tb);
+                    write_tokens(e, fd, stats, plane, start_x, start_y, tx_sz, &tb);
                     nonzero = tb.eob > 0;
                 }
                 for i in 0..step {
@@ -1356,10 +1357,60 @@ impl<'a> TileEncoder<'a> {
         let bw = NUM_8X8_WIDE[bsize as usize] as u32;
         for y in r..(r + bh).min(self.h.mi_rows) {
             for x in c..(c + bw).min(self.h.mi_cols) {
-                fd.mi[(y * self.h.mi_cols + x) as usize] = info;
+                let at = fd.mi_idx(y, x);
+                fd.mi[at] = info;
             }
         }
     }
+}
+
+#[inline]
+fn eob_of(scan: &[u16], coefs: &[i32]) -> usize {
+    scan.iter()
+        .rposition(|&p| coefs[p as usize] != 0)
+        .map_or(0, |i| i + 1)
+}
+
+#[inline]
+fn bits_of(scan: &[u16], coefs: &[i32]) -> f64 {
+    let mut bits = 0.0;
+    for &p in scan {
+        bits += coef_bits(coefs[p as usize]);
+    }
+    bits
+}
+
+/// The estimated bits of a coefficient in the scan before the end of
+/// block: 1.5 for a zero, else `3 + 2 log2(1 + |v|)` (a table for the
+/// common magnitudes, the same values).
+#[inline]
+fn coef_bits(v: i32) -> f64 {
+    static TABLE: std::sync::OnceLock<Vec<f64>> = std::sync::OnceLock::new();
+    let t = TABLE.get_or_init(|| {
+        (0..1024u32)
+            .map(|m| {
+                if m == 0 {
+                    1.5
+                } else {
+                    3.0 + 2.0 * (1.0 + m as f64).log2()
+                }
+            })
+            .collect()
+    });
+    let m = v.unsigned_abs();
+    match t.get(m as usize) {
+        Some(&b) => b,
+        None => 3.0 + 2.0 * (1.0 + m as f64).log2(),
+    }
+}
+
+/// The mode info columns of tile column `tile_col` (get_tile_offset).
+pub(crate) fn column_bounds(h: &FrameHeader, tile_col: u32) -> (u32, u32) {
+    let off = |n: u32| {
+        let sbs = h.mi_cols.div_ceil(8);
+        (((n * sbs) >> h.tile_cols_log2) << 3).min(h.mi_cols)
+    };
+    (off(tile_col), off(tile_col + 1))
 }
 
 /// The quantiser tables' index for the frame's bit depth: 0, 1, 2 for 8,
@@ -1383,18 +1434,7 @@ fn fd_q(h: &FrameHeader, plane: usize) -> (i32, i32) {
 }
 
 fn scan_for(tx_sz: u8, tx_type: u8) -> &'static [u16] {
-    match (tx_sz, tx_type) {
-        (TX_4X4, ADST_DCT) => &ROW_SCAN_4X4,
-        (TX_4X4, DCT_ADST) => &COL_SCAN_4X4,
-        (TX_4X4, _) => &DEFAULT_SCAN_4X4,
-        (TX_8X8, ADST_DCT) => &ROW_SCAN_8X8,
-        (TX_8X8, DCT_ADST) => &COL_SCAN_8X8,
-        (TX_8X8, _) => &DEFAULT_SCAN_8X8,
-        (TX_16X16, ADST_DCT) => &ROW_SCAN_16X16,
-        (TX_16X16, DCT_ADST) => &COL_SCAN_16X16,
-        (TX_16X16, _) => &DEFAULT_SCAN_16X16,
-        _ => &DEFAULT_SCAN_32X32,
-    }
+    crate::decoder::block::scan(tx_sz, tx_type)
 }
 
 /// read_ref_frames()'s inverse for a single reference `rf` (the frame's
@@ -1452,7 +1492,7 @@ fn write_tokens(
     start_x: usize,
     start_y: usize,
     tx_sz: u8,
-    tb: &TxBlock,
+    tb: &TxBlock<'_>,
 ) {
     let scan = scan_for(tx_sz, tb.tx_type);
     let seg_eob = 16usize << (tx_sz << 1);

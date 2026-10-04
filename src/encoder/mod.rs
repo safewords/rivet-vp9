@@ -45,7 +45,7 @@
 //!   times [`GOLDEN_BOOST`] — and each
 //!   frame's search starts from its own first-pass complexity.
 
-mod fdct;
+pub(crate) mod fdct;
 mod rc;
 mod tile;
 
@@ -59,7 +59,7 @@ use crate::consts::*;
 use crate::decoder::{Decoder, FrameDec, RefFrame};
 use crate::frame::{ChromaFormat, ColorSpace, Frame};
 use crate::header::{FrameHeader, Segmentation};
-use crate::probs::{Counts, Probs};
+use crate::probs::{Accumulate, Counts, Probs};
 use crate::{Error, Result};
 
 /// Encoder settings.
@@ -120,6 +120,17 @@ pub struct Config {
     pub bit_depth: u32,
     /// Chroma sampling of the frames to encode.
     pub chroma: ChromaFormat,
+    /// Tile columns, as their base-2 logarithm: `None` (the default) uses
+    /// as many as the frame width allows (tiles at least 256 samples
+    /// wide); a value outside what the width allows is clamped to it. Tile
+    /// columns are coded independently, in parallel (see
+    /// [`Config::threads`]), at a small cost in compression.
+    pub tile_cols_log2: Option<u32>,
+    /// Threads to encode with: tile columns in parallel, and the decoding
+    /// of each frame for the references. 0 (the default) uses one per
+    /// available core, 1 the calling thread only. The output does not
+    /// depend on it.
+    pub threads: usize,
 }
 
 impl Config {
@@ -146,6 +157,8 @@ impl Config {
             full_range: false,
             bit_depth: 8,
             chroma: ChromaFormat::Yuv420,
+            tile_cols_log2: None,
+            threads: 0,
         }
     }
 
@@ -216,6 +229,7 @@ impl Encoder {
     pub fn new(cfg: Config) -> Self {
         let mut dec = Decoder::new();
         dec.set_max_pixels(cfg.width as u64 * cfg.height as u64);
+        dec.set_threads(cfg.threads);
         Encoder {
             frames: 0,
             force_key: true,
@@ -377,15 +391,27 @@ impl Encoder {
     /// Codes the frame at quantiser `q`: the packet, nothing committed.
     fn code_frame(&self, src: &tile::Source, key: bool, refs: &Refs, q: u8) -> Result<Coded> {
         let h = self.header(key, q);
+        // The references searched: LAST, and GOLDEN when it is another
+        // picture; padded for the whole-pixel search once for both passes.
+        let mut search: Vec<tile::SearchRef> = Vec::new();
+        if let Some(last) = &refs[0] {
+            search.push(tile::SearchRef::new(&h, LAST_FRAME, last));
+            if let Some(golden) = &refs[1]
+                && self.cfg.golden_interval > 0
+                && !Arc::ptr_eq(golden, last)
+            {
+                search.push(tile::SearchRef::new(&h, GOLDEN_FRAME, golden));
+            }
+        }
         // A first pass with the default probabilities measures the
         // coefficient statistics; the coefficient probabilities that pay
         // for their own update are sent, and the frame coded again with them.
         let defaults = Probs::default();
         // The second pass replays the first's block decisions: they do not
         // depend on the probabilities.
-        let first = self.encode_pass(&h, src, refs, &defaults, None);
+        let first = self.encode_pass(&h, src, refs, &search, &defaults, None);
         let probs = updated_coef_probs(&defaults, &first.stats, h.tx_mode);
-        let second = self.encode_pass(&h, src, refs, &probs, Some(first.decisions));
+        let second = self.encode_pass(&h, src, refs, &search, &probs, Some(first.decisions));
         let comp = compressed_header(&h, &defaults, &probs);
         let mut w = BitWriter::default();
         self.uncompressed_header(&mut w, &h, comp.len())?;
@@ -401,37 +427,102 @@ impl Encoder {
 
     /// Codes the tiles of a frame with `probs`; returns the tile data, the
     /// coefficient statistics and (debug builds, a replaying pass) the
-    /// loop-filtered reconstruction.
+    /// loop-filtered reconstruction. Tile columns are coded in parallel
+    /// when [`Config::threads`] allows, each into its own reconstruction.
     fn encode_pass(
         &self,
         h: &FrameHeader,
         src: &tile::Source,
         refs: &Refs,
+        search: &[tile::SearchRef],
         probs: &Probs,
-        replay: Option<Vec<tile::Decision>>,
+        replay: Option<Vec<Vec<tile::Decision>>>,
     ) -> Pass {
-        let keep = replay.is_some();
+        let keep = replay.is_some() && cfg!(debug_assertions);
         let seg = Segmentation::default();
-        let mut probs = probs.clone();
-        let mut counts = Box::<Counts>::default();
-        // The references searched: LAST, and GOLDEN when it is another
-        // picture.
-        let mut search: Vec<(i8, &RefFrame)> = Vec::new();
-        if let Some(last) = &refs[0] {
-            search.push((LAST_FRAME, last));
-            if let Some(golden) = &refs[1]
-                && self.cfg.golden_interval > 0
-                && !Arc::ptr_eq(golden, last)
-            {
-                search.push((GOLDEN_FRAME, golden));
+        let tile_cols = 1usize << h.tile_cols_log2;
+        let mut replay: Vec<Option<Vec<tile::Decision>>> = match replay {
+            Some(v) => v.into_iter().map(Some).collect(),
+            None => (0..tile_cols).map(|_| None).collect(),
+        };
+        let column = |col: usize, replay: Option<Vec<tile::Decision>>| -> Column {
+            let (start, end) = tile::column_bounds(h, col as u32);
+            let mut probs = probs.clone();
+            let mut counts = Box::<Counts>::default();
+            let mut fd = FrameDec::new_columns(
+                h,
+                &seg,
+                &mut probs,
+                &mut counts,
+                &[],
+                None,
+                refs.clone(),
+                start,
+                end,
+            );
+            let mut te = tile::TileEncoder::new(&self.cfg, h, src, search);
+            te.replay = replay.map(|v| (v, 0));
+            let data = te.encode_column(&mut fd, col as u32);
+            let recon = keep.then(|| fd.finish());
+            Column {
+                data,
+                stats: te.stats,
+                decisions: te.decisions,
+                recon,
+            }
+        };
+        let threads = crate::decoder::effective_threads(self.cfg.threads).min(tile_cols);
+        let columns: Vec<Column> = if threads <= 1 {
+            replay
+                .iter_mut()
+                .enumerate()
+                .map(|(col, r)| column(col, r.take()))
+                .collect()
+        } else {
+            let jobs: Vec<std::sync::Mutex<Option<Vec<tile::Decision>>>> =
+                replay.into_iter().map(std::sync::Mutex::new).collect();
+            let next = std::sync::atomic::AtomicUsize::new(0);
+            let mut done: Vec<(usize, Column)> = std::thread::scope(|s| {
+                let workers: Vec<_> = (0..threads)
+                    .map(|_| {
+                        s.spawn(|| {
+                            let mut out = Vec::new();
+                            loop {
+                                let col = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                if col >= tile_cols {
+                                    break out;
+                                }
+                                let r = jobs[col].lock().expect("unpoisoned").take();
+                                out.push((col, column(col, r)));
+                            }
+                        })
+                    })
+                    .collect();
+                workers
+                    .into_iter()
+                    .flat_map(|w| w.join().expect("tile encoder panicked"))
+                    .collect()
+            });
+            done.sort_by_key(|(col, _)| *col);
+            done.into_iter().map(|(_, c)| c).collect()
+        };
+        let mut tiles = Vec::new();
+        let mut stats = Box::new([[[[[[[0u32; 2]; 3]; 6]; 6]; 2]; 2]; 4]);
+        let mut decisions = Vec::with_capacity(tile_cols);
+        let mut parts = Vec::new();
+        for (col, c) in columns.into_iter().enumerate() {
+            if col + 1 < tile_cols {
+                tiles.extend_from_slice(&(c.data.len() as u32).to_be_bytes());
+            }
+            tiles.extend_from_slice(&c.data);
+            stats.accumulate(&c.stats);
+            decisions.push(c.decisions);
+            if let Some((planes, mi)) = c.recon {
+                parts.push((col as u32, planes, mi));
             }
         }
-        let mut fd = FrameDec::new(h, &seg, &mut probs, &mut counts, &[], None, refs.clone());
-        let mut te = tile::TileEncoder::new(&self.cfg, h, src, &search);
-        te.replay = replay.map(|v| (v, 0));
-        let t = te.encode_tiles(&mut fd);
-        let recon = if keep && cfg!(debug_assertions) {
-            let (mut planes, mi) = fd.finish();
+        let recon = keep.then(|| {
+            let (mut planes, mi) = crate::decoder::block::assemble(h, parts);
             let lf = crate::header::LoopFilter {
                 level: self.loop_filter_level(h.base_q_idx as u8),
                 sharpness: 0,
@@ -441,14 +532,12 @@ impl Encoder {
             if lf.level != 0 {
                 crate::decoder::loopfilter::filter_frame(h, &lf, &seg, &mi, &mut planes, 1);
             }
-            Some(planes)
-        } else {
-            None
-        };
+            planes
+        });
         Pass {
-            tiles: t,
-            stats: te.stats,
-            decisions: te.decisions,
+            tiles,
+            stats,
+            decisions,
             recon,
         }
     }
@@ -472,10 +561,12 @@ impl Encoder {
         let mi_rows = ht.div_ceil(8);
         let sb64_cols = mi_cols.div_ceil(8);
         let sb64_rows = mi_rows.div_ceil(8);
-        let mut min_log2 = 0;
-        while (MAX_TILE_WIDTH_B64 << min_log2) < sb64_cols {
-            min_log2 += 1;
-        }
+        let (min_log2, max_log2) = tile_cols_log2_range(sb64_cols);
+        let tile_cols_log2 = self
+            .cfg
+            .tile_cols_log2
+            .unwrap_or(max_log2)
+            .clamp(min_log2, max_log2.max(min_log2));
         let lossless = q == 0;
         let (ss_x, ss_y) = self.cfg.chroma.shifts();
         FrameHeader {
@@ -503,7 +594,7 @@ impl Encoder {
             frame_parallel_decoding_mode: true,
             base_q_idx: q as i32,
             lossless,
-            tile_cols_log2: min_log2,
+            tile_cols_log2,
             frame_is_intra: key,
             mi_cols,
             mi_rows,
@@ -592,12 +683,11 @@ impl Encoder {
         w.f(1, 0);
         w.f(1, 0);
         w.f(1, 0); // segmentation_enabled
-        // tile_info(): the minimum number of tile columns, one tile row.
-        let mut max_log2 = 1;
-        while (h.sb64_cols >> max_log2) >= MIN_TILE_WIDTH_B64 {
-            max_log2 += 1;
+        // tile_info(): the tile columns, one tile row.
+        let (min_log2, max_log2) = tile_cols_log2_range(h.sb64_cols);
+        for _ in min_log2..h.tile_cols_log2 {
+            w.f(1, 1); // increment_tile_cols_log2
         }
-        max_log2 -= 1;
         if h.tile_cols_log2 < max_log2 {
             w.f(1, 0); // increment_tile_cols_log2
         }
@@ -607,11 +697,34 @@ impl Encoder {
     }
 }
 
+/// calc_min_log2_tile_cols and calc_max_log2_tile_cols (7.2.14 / 6.2.14).
+fn tile_cols_log2_range(sb64_cols: u32) -> (u32, u32) {
+    let mut min_log2 = 0;
+    while (MAX_TILE_WIDTH_B64 << min_log2) < sb64_cols {
+        min_log2 += 1;
+    }
+    let mut max_log2 = 1;
+    while (sb64_cols >> max_log2) >= MIN_TILE_WIDTH_B64 {
+        max_log2 += 1;
+    }
+    (min_log2, max_log2 - 1)
+}
+
+/// What coding one tile column produced.
+struct Column {
+    data: Vec<u8>,
+    stats: Box<tile::CoefStats>,
+    decisions: Vec<tile::Decision>,
+    /// Debug builds, replaying pass: the column's reconstruction.
+    recon: Option<([crate::decoder::PlaneBuf; 3], Vec<crate::decoder::MiInfo>)>,
+}
+
 /// What one coding pass over a frame produced.
 struct Pass {
     tiles: Vec<u8>,
     stats: Box<tile::CoefStats>,
-    decisions: Vec<tile::Decision>,
+    /// The decisions of each tile column.
+    decisions: Vec<Vec<tile::Decision>>,
     /// Debug builds, second pass: the reconstruction, loop filtered.
     recon: Option<[crate::decoder::PlaneBuf; 3]>,
 }

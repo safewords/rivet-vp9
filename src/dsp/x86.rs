@@ -569,3 +569,235 @@ pub(crate) unsafe fn lf_sse41(
 ) {
     super::lf::edges_simd::<V16x8>(buf, stride, x0, y0, vertical, n_edges, n_runs, e, bit_depth);
 }
+
+// ---------------------------------------------------------------------
+// The encoder's forward transform: 16-bit matrix products with pmaddwd.
+// Pass 1 (`U = Fc R`, rounded to 16 bits) interleaves two residual rows
+// and multiplies by a broadcast pair of matrix entries; pass 2 (`U Fr^T`)
+// broadcasts a pair of `U` entries against pairs of matrix columns. Every
+// partial sum is bounded by the full sum's bound (fdct.rs), so the 32-bit
+// arithmetic is exact and equals the scalar code's.
+
+/// [`crate::encoder::fdct::forward_scalar`] with SSE4.1, any size.
+#[target_feature(enable = "sse4.1")]
+pub(crate) unsafe fn fdct_sse41(t: &crate::encoder::fdct::Fwd2d, res: &[i16], out: &mut [i32]) {
+    let n0 = t.fc.n0;
+    let half = n0 / 2;
+    assert!(res.len() >= n0 * n0 && out.len() >= n0 * n0);
+    assert!(t.fc.pk.len() >= n0 * half && t.fr.cols.len() >= half * n0);
+    let mut u = [0i16; 32 * 32];
+    let rnd = _mm_set1_epi32(1 << (t.shift1 - 1));
+    let sh = _mm_cvtsi32_si128(t.shift1 as i32);
+    let rp = res.as_ptr();
+    let up = u.as_mut_ptr();
+    let width = n0.min(8);
+    for c in (0..n0).step_by(8) {
+        let mut il_lo = [_mm_setzero_si128(); 16];
+        let mut il_hi = [_mm_setzero_si128(); 16];
+        for kp in 0..half {
+            let (a, b) = if width == 4 {
+                (
+                    _mm_loadl_epi64(rp.add(2 * kp * n0) as *const __m128i),
+                    _mm_loadl_epi64(rp.add((2 * kp + 1) * n0) as *const __m128i),
+                )
+            } else {
+                (
+                    _mm_loadu_si128(rp.add(2 * kp * n0 + c) as *const __m128i),
+                    _mm_loadu_si128(rp.add((2 * kp + 1) * n0 + c) as *const __m128i),
+                )
+            };
+            il_lo[kp] = _mm_unpacklo_epi16(a, b);
+            il_hi[kp] = _mm_unpackhi_epi16(a, b);
+        }
+        for f in 0..n0 {
+            let pk = &t.fc.pk[f * half..f * half + half];
+            let mut lo = rnd;
+            let mut hi = rnd;
+            for kp in 0..half {
+                let k = _mm_set1_epi32(pk[kp]);
+                lo = _mm_add_epi32(lo, _mm_madd_epi16(il_lo[kp], k));
+                hi = _mm_add_epi32(hi, _mm_madd_epi16(il_hi[kp], k));
+            }
+            let v = _mm_packs_epi32(_mm_sra_epi32(lo, sh), _mm_sra_epi32(hi, sh));
+            if width == 4 {
+                _mm_storel_epi64(up.add(f * n0) as *mut __m128i, v);
+            } else {
+                _mm_storeu_si128(up.add(f * n0 + c) as *mut __m128i, v);
+            }
+        }
+    }
+    let cols = t.fr.cols.as_ptr();
+    let op = out.as_mut_ptr();
+    for f in 0..n0 {
+        for g in (0..n0).step_by(4) {
+            let mut acc = _mm_setzero_si128();
+            for jp in 0..half {
+                let pair = (u[f * n0 + 2 * jp] as u16 as u32
+                    | (u[f * n0 + 2 * jp + 1] as u16 as u32) << 16)
+                    as i32;
+                let m = _mm_loadu_si128(cols.add(jp * n0 + g) as *const __m128i);
+                acc = _mm_add_epi32(acc, _mm_madd_epi16(_mm_set1_epi32(pair), m));
+            }
+            _mm_storeu_si128(op.add(f * n0 + g) as *mut __m128i, acc);
+        }
+    }
+}
+
+/// [`fdct_sse41`] with AVX2, 16 x 16 and 32 x 32.
+#[target_feature(enable = "avx2")]
+pub(crate) unsafe fn fdct_avx2(t: &crate::encoder::fdct::Fwd2d, res: &[i16], out: &mut [i32]) {
+    let n0 = t.fc.n0;
+    let half = n0 / 2;
+    assert!(n0 >= 16 && res.len() >= n0 * n0 && out.len() >= n0 * n0);
+    assert!(t.fc.pk.len() >= n0 * half && t.fr.cols.len() >= half * n0);
+    let mut u = [0i16; 32 * 32];
+    let rnd = _mm256_set1_epi32(1 << (t.shift1 - 1));
+    let sh = _mm_cvtsi32_si128(t.shift1 as i32);
+    let rp = res.as_ptr();
+    let up = u.as_mut_ptr();
+    for c in (0..n0).step_by(16) {
+        let mut il_lo = [_mm256_setzero_si256(); 16];
+        let mut il_hi = [_mm256_setzero_si256(); 16];
+        for kp in 0..half {
+            let a = _mm256_loadu_si256(rp.add(2 * kp * n0 + c) as *const __m256i);
+            let b = _mm256_loadu_si256(rp.add((2 * kp + 1) * n0 + c) as *const __m256i);
+            il_lo[kp] = _mm256_unpacklo_epi16(a, b);
+            il_hi[kp] = _mm256_unpackhi_epi16(a, b);
+        }
+        for f in 0..n0 {
+            let pk = &t.fc.pk[f * half..f * half + half];
+            let mut lo = rnd;
+            let mut hi = rnd;
+            for kp in 0..half {
+                let k = _mm256_set1_epi32(pk[kp]);
+                lo = _mm256_add_epi32(lo, _mm256_madd_epi16(il_lo[kp], k));
+                hi = _mm256_add_epi32(hi, _mm256_madd_epi16(il_hi[kp], k));
+            }
+            let v = _mm256_packs_epi32(_mm256_sra_epi32(lo, sh), _mm256_sra_epi32(hi, sh));
+            _mm256_storeu_si256(up.add(f * n0 + c) as *mut __m256i, v);
+        }
+    }
+    let cols = t.fr.cols.as_ptr();
+    let op = out.as_mut_ptr();
+    for f in 0..n0 {
+        let mut acc = [_mm256_setzero_si256(); 4];
+        for jp in 0..half {
+            let pair = (u[f * n0 + 2 * jp] as u16 as u32
+                | (u[f * n0 + 2 * jp + 1] as u16 as u32) << 16) as i32;
+            let p = _mm256_set1_epi32(pair);
+            for (gi, a) in acc.iter_mut().enumerate().take(n0 / 8) {
+                let m = _mm256_loadu_si256(cols.add(jp * n0 + 8 * gi) as *const __m256i);
+                *a = _mm256_add_epi32(*a, _mm256_madd_epi16(p, m));
+            }
+        }
+        for (gi, a) in acc.iter().enumerate().take(n0 / 8) {
+            _mm256_storeu_si256(op.add(f * n0 + 8 * gi) as *mut __m256i, *a);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Distortion: sums of squared and absolute differences of samples (at most
+// 12 bits, so differences fit 16 bits).
+
+/// [`super::pixel::sse_scalar`] with SSE4.1, `w` at least 8. Reads `w`
+/// samples of `h` rows of each.
+#[target_feature(enable = "sse4.1")]
+pub(crate) unsafe fn sse_sse41(
+    a: &[u16],
+    sa: usize,
+    b: &[u16],
+    sb: usize,
+    w: usize,
+    h: usize,
+) -> u64 {
+    let w8 = w & !7;
+    let mut total = _mm_setzero_si128();
+    let mut tail = 0u64;
+    for i in 0..h {
+        let (pa, pb) = (a.as_ptr().add(i * sa), b.as_ptr().add(i * sb));
+        let mut row = _mm_setzero_si128();
+        for c in (0..w8).step_by(8) {
+            let x = _mm_loadu_si128(pa.add(c) as *const __m128i);
+            let y = _mm_loadu_si128(pb.add(c) as *const __m128i);
+            let d = _mm_sub_epi16(x, y);
+            row = _mm_add_epi32(row, _mm_madd_epi16(d, d));
+        }
+        // A row of up to 64 samples puts at most 8 x 2 x 4095^2 in a lane:
+        // within 32 bits unsigned. Widen per row.
+        total = _mm_add_epi64(total, _mm_cvtepu32_epi64(row));
+        total = _mm_add_epi64(total, _mm_cvtepu32_epi64(_mm_srli_si128(row, 8)));
+        for c in w8..w {
+            let d = *pa.add(c) as i64 - *pb.add(c) as i64;
+            tail += (d * d) as u64;
+        }
+    }
+    let mut out = [0u64; 2];
+    _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, total);
+    out[0] + out[1] + tail
+}
+
+/// [`super::pixel::sad_scalar`] with SSE4.1, `w` at least 8.
+#[target_feature(enable = "sse4.1")]
+pub(crate) unsafe fn sad_sse41(
+    a: &[u16],
+    sa: usize,
+    b: &[u16],
+    sb: usize,
+    w: usize,
+    h: usize,
+) -> u64 {
+    let w8 = w & !7;
+    let ones = _mm_set1_epi16(1);
+    let mut total = _mm_setzero_si128();
+    let mut tail = 0u64;
+    for i in 0..h {
+        let (pa, pb) = (a.as_ptr().add(i * sa), b.as_ptr().add(i * sb));
+        let mut row = _mm_setzero_si128();
+        for c in (0..w8).step_by(8) {
+            let x = _mm_loadu_si128(pa.add(c) as *const __m128i);
+            let y = _mm_loadu_si128(pb.add(c) as *const __m128i);
+            let d = _mm_or_si128(_mm_subs_epu16(x, y), _mm_subs_epu16(y, x));
+            row = _mm_add_epi32(row, _mm_madd_epi16(d, ones));
+        }
+        total = _mm_add_epi64(total, _mm_cvtepu32_epi64(row));
+        total = _mm_add_epi64(total, _mm_cvtepu32_epi64(_mm_srli_si128(row, 8)));
+        for c in w8..w {
+            tail += (*pa.add(c) as i32 - *pb.add(c) as i32).unsigned_abs() as u64;
+        }
+    }
+    let mut out = [0u64; 2];
+    _mm_storeu_si128(out.as_mut_ptr() as *mut __m128i, total);
+    out[0] + out[1] + tail
+}
+
+/// [`crate::encoder::fdct::quantize_scalar`] with SSE4.1: four at a time,
+/// the same single-precision operations.
+#[target_feature(enable = "sse4.1")]
+pub(crate) unsafe fn quantize_sse41(
+    d: &[i32],
+    scale: f32,
+    bias: f32,
+    max_coef: i32,
+    out: &mut [i32],
+) {
+    let len = d.len().min(out.len());
+    let len4 = len & !3;
+    let sc = _mm_set1_ps(scale);
+    let bi = _mm_set1_ps(bias);
+    let mx = _mm_set1_epi32(max_coef);
+    let (pd, po) = (d.as_ptr(), out.as_mut_ptr());
+    for i in (0..len4).step_by(4) {
+        let v = _mm_loadu_si128(pd.add(i) as *const __m128i);
+        let t = _mm_add_ps(_mm_mul_ps(_mm_cvtepi32_ps(_mm_abs_epi32(v)), sc), bi);
+        let l = _mm_min_epi32(_mm_cvttps_epi32(t), mx);
+        _mm_storeu_si128(po.add(i) as *mut __m128i, _mm_sign_epi32(l, v));
+    }
+    crate::encoder::fdct::quantize_scalar(
+        &d[len4..len],
+        scale,
+        bias,
+        max_coef,
+        &mut out[len4..len],
+    );
+}
