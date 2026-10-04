@@ -16,6 +16,9 @@ pub(crate) mod itx;
 pub(crate) mod lf;
 pub(crate) mod pixel;
 
+#[cfg(test)]
+mod bench;
+
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod x86;
 

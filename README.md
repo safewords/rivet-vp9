@@ -17,9 +17,9 @@ transcoder, as its VP9 codec on both sides. Usable on its own by anything
 that has VP9 frames (from IVF, WebM / Matroska, MP4) and wants planar
 pictures back, or planar pictures and wants VP9.
 
-This is an early milestone of a longer effort: the decoder is complete but
-single-threaded and scalar; the encoder is complete enough to use but slow
-and missing several tools. What is and is not there is listed precisely
+This is an early milestone of a longer effort: the decoder is complete,
+with SIMD kernels and threads; the encoder is complete enough to use but
+slow and missing several tools. What is and is not there is listed precisely
 below.
 
 Published as `rivet-vp9`; **imported as `vp9`** (`use vp9::…`). One
@@ -53,10 +53,15 @@ decoder outputs (`Decoder::decode_all` returns every one).
 
 Not there yet:
 
-- **Speed.** Decoding is single-threaded scalar Rust: about 570 frames/s
-  at 426x240, 170 at 854x356, 23 at 1920x1080 and 8 at 3840x2160 on one
-  core of the machine it was written on. No tile or frame threading, no
-  SIMD, no frame-buffer pool (each frame allocates; output copies).
+- **Speed.** The hot kernels (inverse transforms, 8-tap prediction,
+  compound averaging, loop filter) have SSE4.1 / AVX2 and NEON versions,
+  bit-identical to the scalar ones (`VP9_FORCE_SCALAR=1` selects those);
+  tile columns decode in parallel and the loop filter runs superblock rows
+  as a wavefront (`Decoder::set_threads`, default one per core). On a
+  Ryzen 9 9950X (`tools/bench.sh`): the 1080p test vector (one tile
+  column) at about 95 frames/s on one thread, 100 on all; this crate's
+  own 4-tile 1080p encode at 105 on one thread, 190 on all; 720p at 230 /
+  400. No frame threading, and the bool decoder is serial within a tile.
 - **Error recovery.** A corrupt frame returns `Error::Bitstream`; there is
   no concealment, and the decoder's state after an error is whatever the
   failed frame changed before it failed, so decoding should resume at the
@@ -136,8 +141,14 @@ complete the API.
 
 Not there yet (in rough order of value):
 
-- **Speed.** Single-threaded scalar Rust: at 352x288, about 1.7 frames/s at the default speed 1, 0.6 at speed 0
-  and 10 at speed 2 (1.2 / 0.6 / 12 with LAST only).
+- **Speed.** The forward transform is a 16-bit fixed-point matrix product
+  and distortion, quantisation and the decoder's kernels are SIMD (the
+  same output with `VP9_FORCE_SCALAR=1`); tile columns (`Config::
+  tile_cols_log2`, default as many as the width allows) are coded in
+  parallel (`Config::threads`), with the same output for any thread
+  count. On a Ryzen 9 9950X at the default speed 1: 720p about 1.8
+  frames/s on one thread, 4.9 on all; 1080p 0.74 / 2.4. The search
+  itself is exhaustive (every candidate coded for real).
 - **Sub-8x8 blocks** (4x4, 4x8, 8x4 partitions of an 8x8), and the
   transform size is searched for the modes chosen at the largest one rather
   than jointly.
