@@ -56,12 +56,14 @@ Not there yet:
 - **Speed.** The hot kernels (inverse transforms, 8-tap prediction,
   compound averaging, loop filter) have SSE4.1 / AVX2 and NEON versions,
   bit-identical to the scalar ones (`VP9_FORCE_SCALAR=1` selects those);
-  tile columns decode in parallel and the loop filter runs superblock rows
+  tile columns decode in parallel; a single tile column is parsed on one
+  thread while the others reconstruct and loop filter its superblock rows
   as a wavefront (`Decoder::set_threads`, default one per core). On a
   Ryzen 9 9950X (`tools/bench.sh`): the 1080p test vector (one tile
-  column) at about 95 frames/s on one thread, 100 on all; this crate's
+  column) at about 95 frames/s on one thread, 150 on all; this crate's
   own 4-tile 1080p encode at 105 on one thread, 190 on all; 720p at 230 /
-  400. No frame threading, and the bool decoder is serial within a tile.
+  400. No frame threading; the parsing of a tile is serial, which bounds
+  a single-tile stream.
 - **Error recovery.** A corrupt frame returns `Error::Bitstream`; there is
   no concealment, and the decoder's state after an error is whatever the
   failed frame changed before it failed, so decoding should resume at the

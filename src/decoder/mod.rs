@@ -33,6 +33,8 @@ pub(crate) struct PlaneBuf {
     pub stride: usize,
     /// The plane column of `data`'s first column.
     pub x0: usize,
+    /// The plane row of `data`'s first row (a band of rows).
+    pub y0: usize,
 }
 
 impl PlaneBuf {
@@ -41,13 +43,14 @@ impl PlaneBuf {
             data: pool::samples(w * h),
             stride: w,
             x0: 0,
+            y0: 0,
         }
     }
 
     /// The index of the sample at plane column `x`, row `y`.
     #[inline(always)]
     pub(crate) fn at(&self, x: usize, y: usize) -> usize {
-        y * self.stride + x - self.x0
+        (y - self.y0) * self.stride + x - self.x0
     }
 }
 
@@ -306,8 +309,17 @@ impl Decoder {
         let non420 = (h.subsampling_x, h.subsampling_y) != (1, 1);
         h.legacy_uv = non420 && !h.frame_is_intra && self.legacy_uv;
         let threads = effective_threads(self.threads);
+        // A single tile column with threads: parsing and reconstruction in
+        // a pipeline, the loop filter in it too unless this frame may be
+        // decoded again with the legacy chroma rules.
+        let lf_inside = threads > 1
+            && h.tile_cols_log2 == 0
+            && h.sb64_rows > 1
+            && lf.level != 0
+            && !(non420 && h.frame_is_intra);
         let mut decoded = decode_tile_data(
             threads,
+            lf_inside.then_some(&lf),
             &h,
             &seg,
             &mut probs,
@@ -322,6 +334,7 @@ impl Decoder {
                 legacy.legacy_uv = true;
                 let retry = decode_tile_data(
                     threads,
+                    None,
                     &legacy,
                     &seg,
                     &mut probs,
@@ -340,7 +353,7 @@ impl Decoder {
         let (planes, mi, counts, _) = decoded?;
         let mut planes = planes;
         // Loop filter (8.8).
-        if lf.level != 0 {
+        if lf.level != 0 && !lf_inside {
             loopfilter::filter_frame(&h, &lf, &seg, &mi, &mut planes, threads);
         }
         // Backward adaptation (refresh_probs, 6.1.2).
@@ -422,6 +435,7 @@ pub(crate) fn effective_threads(threads: usize) -> usize {
 #[allow(clippy::too_many_arguments)]
 fn decode_tile_data(
     threads: usize,
+    lf: Option<&header::LoopFilter>,
     h: &FrameHeader,
     seg: &header::Segmentation,
     probs: &mut Probs,
@@ -430,6 +444,19 @@ fn decode_tile_data(
     refs: &[Option<Arc<RefFrame>>; 3],
     data: &[u8],
 ) -> Result<TileData> {
+    if threads > 1 && h.tile_cols_log2 == 0 && h.sb64_rows > 1 {
+        return block::decode_tiles_pipelined(
+            h,
+            seg,
+            probs,
+            prev_segment_ids,
+            prev_mvs,
+            refs,
+            data,
+            threads,
+            lf,
+        );
+    }
     if threads > 1 && h.tile_cols_log2 > 0 {
         return block::decode_tiles_parallel(
             h,

@@ -56,33 +56,7 @@ pub(crate) fn filter_frame(
     planes: &mut [PlaneBuf; 3],
     threads: usize,
 ) {
-    let lvl = lvl_lookup(lf, seg);
-    let shift = if lf.sharpness > 4 {
-        2
-    } else if lf.sharpness > 0 {
-        1
-    } else {
-        0
-    };
-    // limit / blimit / thresh per level.
-    let mut params = [(0i32, 0i32, 0i32); 64];
-    for (l, p) in params.iter_mut().enumerate() {
-        let l = l as i32;
-        let limit = if lf.sharpness > 0 {
-            (l >> shift).clamp(1, 9 - lf.sharpness as i32)
-        } else {
-            (l >> shift).max(1)
-        };
-        *p = (limit, 2 * (l + 2) + limit, l >> 4);
-    }
-    let level = crate::dsp::level();
-    let ctx = Ctx {
-        h,
-        mi,
-        lvl: &lvl,
-        params: &params,
-        level,
-    };
+    let ctx = Ctx::new(h, lf, seg, mi, 0);
     let bands = h.sb64_rows as usize;
     if threads > 1 && bands > 1 {
         filter_bands(&ctx, planes, threads);
@@ -145,12 +119,66 @@ impl Geometry {
 }
 
 /// What every superblock's filtering reads.
-struct Ctx<'a> {
+pub(crate) struct Ctx<'a> {
     h: &'a FrameHeader,
+    /// Mode info rows from `mi_row0` on, `mi_cols` each.
     mi: &'a [MiInfo],
-    lvl: &'a [[[u8; 2]; 4]; MAX_SEGMENTS],
-    params: &'a [(i32, i32, i32); 64],
+    mi_row0: u32,
+    lvl: [[[u8; 2]; 4]; MAX_SEGMENTS],
+    params: [(i32, i32, i32); 64],
     level: crate::dsp::Level,
+}
+
+impl<'a> Ctx<'a> {
+    /// The filter of the frame with header `h`; `mi` holds the mode info
+    /// from row `mi_row0` on.
+    pub(crate) fn new(
+        h: &'a FrameHeader,
+        lf: &LoopFilter,
+        seg: &Segmentation,
+        mi: &'a [MiInfo],
+        mi_row0: u32,
+    ) -> Self {
+        let lvl = lvl_lookup(lf, seg);
+        let shift = if lf.sharpness > 4 {
+            2
+        } else if lf.sharpness > 0 {
+            1
+        } else {
+            0
+        };
+        // limit / blimit / thresh per level.
+        let mut params = [(0i32, 0i32, 0i32); 64];
+        for (l, p) in params.iter_mut().enumerate() {
+            let l = l as i32;
+            let limit = if lf.sharpness > 0 {
+                (l >> shift).clamp(1, 9 - lf.sharpness as i32)
+            } else {
+                (l >> shift).max(1)
+            };
+            *p = (limit, 2 * (l + 2) + limit, l >> 4);
+        }
+        Ctx {
+            h,
+            mi,
+            mi_row0,
+            lvl,
+            params,
+            level: crate::dsp::level(),
+        }
+    }
+
+    /// The same filter over the mode info rows from `mi_row0` in `mi`.
+    pub(crate) fn with_mi<'b>(&'b self, mi: &'b [MiInfo], mi_row0: u32) -> Ctx<'b> {
+        Ctx {
+            h: self.h,
+            mi,
+            mi_row0,
+            lvl: self.lvl,
+            params: self.params,
+            level: self.level,
+        }
+    }
 }
 
 /// Rows above a superblock row that its filtering reads and writes: the
@@ -158,7 +186,7 @@ struct Ctx<'a> {
 const HALO: usize = 8;
 
 /// The bottom rows of a band (superblock row) as final as the band's own
-/// filtering leaves them, for the band below: the columns before `done`.
+/// work leaves them, for the band below: the columns before `done`.
 struct Halo {
     done: [usize; 3],
     rows: [Vec<u16>; 3],
@@ -181,32 +209,13 @@ struct Halo {
 /// filtered in a small buffer of the halo and the band's first rows. The
 /// halos are written back in band order once every band is done.
 fn filter_bands(ctx: &Ctx, planes: &mut [PlaneBuf; 3], threads: usize) {
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Condvar, Mutex};
     let h = ctx.h;
     let bands = h.sb64_rows as usize;
-    let sb_cols = h.sb64_cols as usize;
-    let sub = |p: usize| -> (u32, u32) {
-        if p > 0 {
-            (h.subsampling_x, h.subsampling_y)
-        } else {
-            (0, 0)
-        }
-    };
     let strides = [planes[0].stride, planes[1].stride, planes[2].stride];
-    let band_h = |p: usize| 64usize >> sub(p).1;
-    // Boundary k: the bottom rows of band k, for band k + 1.
-    let boundaries: Vec<(Mutex<Halo>, Condvar)> = (0..bands.saturating_sub(1))
-        .map(|_| {
-            (
-                Mutex::new(Halo {
-                    done: [0; 3],
-                    rows: strides.map(|s| vec![0u16; HALO * s]),
-                }),
-                Condvar::new(),
-            )
-        })
-        .collect();
+    let band_h = |p: usize| band_rows(h, p);
+    let shared = BandLinks::new(bands, strides, HALO);
     // Each band's rows of each plane, to hand to the band's task.
     let [py, pu, pv] = planes;
     let chunks: Vec<Mutex<Option<[&mut [u16]; 3]>>> = py
@@ -217,95 +226,6 @@ fn filter_bands(ctx: &Ctx, planes: &mut [PlaneBuf; 3], threads: usize) {
         .map(|((y, u), v)| Mutex::new(Some([y, u, v])))
         .collect();
     let next = AtomicUsize::new(0);
-    let band = |k: usize| -> [Vec<u16>; 3] {
-        let rows = chunks[k]
-            .lock()
-            .expect("unpoisoned")
-            .take()
-            .expect("each band once");
-        let mut halo: [Vec<u16>; 3] = strides.map(|s| vec![0u16; HALO * s]);
-        let mut copied = [0usize; 3];
-        let mut published = [0usize; 3];
-        let mut edges = lf::Edges::new();
-        let mut top = vec![0u16; 2 * HALO * 64];
-        for c in 0..sb_cols {
-            if k > 0 {
-                let (lock, cv) = &boundaries[k - 1];
-                let mut b = lock.lock().expect("unpoisoned");
-                for p in 0..3 {
-                    let need = ((64 * (c + 1)) >> sub(p).0).min(strides[p]);
-                    while b.done[p] < need {
-                        b = cv.wait(b).expect("unpoisoned");
-                    }
-                    let (from, to, s) = (copied[p], b.done[p], strides[p]);
-                    for r in 0..HALO {
-                        halo[p][r * s + from..r * s + to]
-                            .copy_from_slice(&b.rows[p][r * s + from..r * s + to]);
-                    }
-                    copied[p] = to;
-                }
-            }
-            for p in 0..3 {
-                let s = strides[p];
-                let origin = k * band_h(p);
-                for pass in 0..2 {
-                    let g = superblock(ctx, p, pass, (k * 8) as u32, (c * 8) as u32, &mut edges);
-                    let mut first = 0;
-                    if pass == 1 && k > 0 {
-                        // Edge 0 is the band's top: through the halo.
-                        first = 1;
-                        if edges.fs[0][..g.n_runs].iter().any(|&f| f != lf::SKIP) {
-                            let w = 4 * g.n_runs;
-                            let t = &mut top[..2 * HALO * w];
-                            for r in 0..HALO {
-                                t[r * w..r * w + w]
-                                    .copy_from_slice(&halo[p][r * s + g.x0..r * s + g.x0 + w]);
-                                t[(HALO + r) * w..(HALO + r) * w + w]
-                                    .copy_from_slice(&rows[p][r * s + g.x0..r * s + g.x0 + w]);
-                            }
-                            let tg = Geometry {
-                                x0: 0,
-                                y0: HALO,
-                                n_edges: 1,
-                                ..g
-                            };
-                            tg.filter(ctx, t, w, 0, 0, &edges);
-                            for r in 0..HALO {
-                                halo[p][r * s + g.x0..r * s + g.x0 + w]
-                                    .copy_from_slice(&t[r * w..r * w + w]);
-                                rows[p][r * s + g.x0..r * s + g.x0 + w]
-                                    .copy_from_slice(&t[(HALO + r) * w..(HALO + r) * w + w]);
-                            }
-                        }
-                    }
-                    g.filter(ctx, rows[p], s, origin, first, &edges);
-                }
-            }
-            if k + 1 < bands {
-                let (lock, cv) = &boundaries[k];
-                let mut b = lock.lock().expect("unpoisoned");
-                for p in 0..3 {
-                    let s = strides[p];
-                    let done = if c + 1 == sb_cols {
-                        s
-                    } else {
-                        ((64 * (c + 1)) >> sub(p).0) - HALO
-                    };
-                    let from = published[p];
-                    let base = band_h(p) - HALO;
-                    for r in 0..HALO {
-                        b.rows[p][r * s + from..r * s + done].copy_from_slice(
-                            &rows[p][(base + r) * s + from..(base + r) * s + done],
-                        );
-                    }
-                    published[p] = done;
-                    b.done[p] = done;
-                }
-                cv.notify_all();
-            }
-        }
-        halo
-    };
     let workers = threads.min(bands);
     let mut halos: Vec<(usize, [Vec<u16>; 3])> = std::thread::scope(|s| {
         let handles: Vec<_> = (0..workers)
@@ -317,7 +237,14 @@ fn filter_bands(ctx: &Ctx, planes: &mut [PlaneBuf; 3], threads: usize) {
                         if k >= bands {
                             break out;
                         }
-                        out.push((k, band(k)));
+                        let rows = chunks[k]
+                            .lock()
+                            .expect("unpoisoned")
+                            .take()
+                            .expect("each band once");
+                        let halo = filter_band(ctx, &shared, k, rows, strides)
+                            .expect("nothing aborts the loop filter alone");
+                        out.push((k, halo));
                     }
                 })
             })
@@ -337,6 +264,203 @@ fn filter_bands(ctx: &Ctx, planes: &mut [PlaneBuf; 3], threads: usize) {
     }
 }
 
+/// The rows of plane `p` in a band (a superblock row).
+pub(crate) fn band_rows(h: &FrameHeader, p: usize) -> usize {
+    if p > 0 { 64 >> h.subsampling_y } else { 64 }
+}
+
+/// The hand-over of rows from each band to the band below, column range by
+/// column range, between threads: boundary k carries `rows` rows of band
+/// k's bottom (as `Halo::rows`), final before `Halo::done`. Setting
+/// `abort` wakes and stops every waiter.
+pub(crate) struct BandLinks {
+    links: Vec<(std::sync::Mutex<Halo>, std::sync::Condvar)>,
+    abort: std::sync::atomic::AtomicBool,
+}
+
+impl BandLinks {
+    pub(crate) fn new(bands: usize, strides: [usize; 3], rows: usize) -> Self {
+        BandLinks {
+            links: (0..bands.saturating_sub(1))
+                .map(|_| {
+                    (
+                        std::sync::Mutex::new(Halo {
+                            done: [0; 3],
+                            rows: strides.map(|s| vec![0u16; rows * s]),
+                        }),
+                        std::sync::Condvar::new(),
+                    )
+                })
+                .collect(),
+            abort: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// Stops every waiter.
+    pub(crate) fn abort(&self) {
+        self.abort.store(true, std::sync::atomic::Ordering::SeqCst);
+        for (m, cv) in &self.links {
+            let _g = m.lock().unwrap_or_else(|e| e.into_inner());
+            cv.notify_all();
+        }
+    }
+
+    /// Waits until boundary `k` has, for each plane, columns up to
+    /// `need[p]`; then copies the columns from `copied[p]` on into
+    /// `dst[p]` (row stride `strides[p]`). `None` when aborted.
+    pub(crate) fn receive(
+        &self,
+        k: usize,
+        need: [usize; 3],
+        copied: &mut [usize; 3],
+        dst: &mut [Vec<u16>; 3],
+        strides: [usize; 3],
+        rows: usize,
+    ) -> Option<()> {
+        use std::sync::atomic::Ordering;
+        let (lock, cv) = &self.links[k];
+        let mut b = lock.lock().unwrap_or_else(|e| e.into_inner());
+        for p in 0..3 {
+            while b.done[p] < need[p] {
+                if self.abort.load(Ordering::SeqCst) {
+                    return None;
+                }
+                b = cv.wait(b).unwrap_or_else(|e| e.into_inner());
+            }
+            let (from, to, s) = (copied[p], b.done[p], strides[p]);
+            for r in 0..rows {
+                dst[p][r * s + from..r * s + to]
+                    .copy_from_slice(&b.rows[p][r * s + from..r * s + to]);
+            }
+            copied[p] = to;
+        }
+        if self.abort.load(Ordering::SeqCst) {
+            return None;
+        }
+        Some(())
+    }
+
+    /// Publishes columns `published[p]..done[p]` of `rows` rows of
+    /// `src[p]` from row `first[p]` on.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn publish(
+        &self,
+        k: usize,
+        done: [usize; 3],
+        published: &mut [usize; 3],
+        src: [&[u16]; 3],
+        first: [usize; 3],
+        strides: [usize; 3],
+        rows: usize,
+    ) {
+        let (lock, cv) = &self.links[k];
+        let mut b = lock.lock().unwrap_or_else(|e| e.into_inner());
+        for p in 0..3 {
+            let (s, from, to) = (strides[p], published[p], done[p]);
+            for r in 0..rows {
+                let src_row = (first[p] + r) * s;
+                b.rows[p][r * s + from..r * s + to]
+                    .copy_from_slice(&src[p][src_row + from..src_row + to]);
+            }
+            published[p] = to;
+            b.done[p] = to;
+        }
+        cv.notify_all();
+    }
+}
+
+/// The loop filter of band `k` (superblock row k): its rows in place
+/// (`rows[p]`, row stride `strides[p]`), and the 8 rows above it in a copy
+/// received from band k - 1 through `links` as band k - 1 finishes with
+/// them (see [`filter_bands`]). Returns that copy, filtered, to be written
+/// back over band k - 1's bottom rows; `None` if aborted.
+pub(crate) fn filter_band(
+    ctx: &Ctx,
+    links: &BandLinks,
+    k: usize,
+    rows: [&mut [u16]; 3],
+    strides: [usize; 3],
+) -> Option<[Vec<u16>; 3]> {
+    let h = ctx.h;
+    let bands = h.sb64_rows as usize;
+    let sb_cols = h.sb64_cols as usize;
+    let sub = |p: usize| -> (u32, u32) {
+        if p > 0 {
+            (h.subsampling_x, h.subsampling_y)
+        } else {
+            (0, 0)
+        }
+    };
+    let band_h = |p: usize| band_rows(h, p);
+    let mut halo: [Vec<u16>; 3] = strides.map(|s| vec![0u16; HALO * s]);
+    let mut copied = [0usize; 3];
+    let mut published = [0usize; 3];
+    let mut edges = lf::Edges::new();
+    let mut top = vec![0u16; 2 * HALO * 64];
+    for c in 0..sb_cols {
+        if k > 0 {
+            let need = [0, 1, 2].map(|p| ((64 * (c + 1)) >> sub(p).0).min(strides[p]));
+            links.receive(k - 1, need, &mut copied, &mut halo, strides, HALO)?;
+        }
+        for p in 0..3 {
+            let s = strides[p];
+            let origin = k * band_h(p);
+            for pass in 0..2 {
+                let g = superblock(ctx, p, pass, (k * 8) as u32, (c * 8) as u32, &mut edges);
+                let mut first = 0;
+                if pass == 1 && k > 0 {
+                    // Edge 0 is the band's top: through the halo.
+                    first = 1;
+                    if edges.fs[0][..g.n_runs].iter().any(|&f| f != lf::SKIP) {
+                        let w = 4 * g.n_runs;
+                        let t = &mut top[..2 * HALO * w];
+                        for r in 0..HALO {
+                            t[r * w..r * w + w]
+                                .copy_from_slice(&halo[p][r * s + g.x0..r * s + g.x0 + w]);
+                            t[(HALO + r) * w..(HALO + r) * w + w]
+                                .copy_from_slice(&rows[p][r * s + g.x0..r * s + g.x0 + w]);
+                        }
+                        let tg = Geometry {
+                            x0: 0,
+                            y0: HALO,
+                            n_edges: 1,
+                            ..g
+                        };
+                        tg.filter(ctx, t, w, 0, 0, &edges);
+                        for r in 0..HALO {
+                            halo[p][r * s + g.x0..r * s + g.x0 + w]
+                                .copy_from_slice(&t[r * w..r * w + w]);
+                            rows[p][r * s + g.x0..r * s + g.x0 + w]
+                                .copy_from_slice(&t[(HALO + r) * w..(HALO + r) * w + w]);
+                        }
+                    }
+                }
+                g.filter(ctx, rows[p], s, origin, first, &edges);
+            }
+        }
+        if k + 1 < bands {
+            let done = [0, 1, 2].map(|p| {
+                if c + 1 == sb_cols {
+                    strides[p]
+                } else {
+                    ((64 * (c + 1)) >> sub(p).0) - HALO
+                }
+            });
+            let first = [0, 1, 2].map(|p| band_h(p) - HALO);
+            links.publish(
+                k,
+                done,
+                &mut published,
+                [&*rows[0], &*rows[1], &*rows[2]],
+                first,
+                strides,
+                HALO,
+            );
+        }
+    }
+    Some(halo)
+}
+
 /// The edges of one pass of one plane of the superblock at mode info
 /// (`row`, `col`): fills `e`, returns where they are.
 fn superblock(
@@ -347,7 +471,7 @@ fn superblock(
     col: u32,
     e: &mut lf::Edges,
 ) -> Geometry {
-    let (h, mi, lvl, params) = (ctx.h, ctx.mi, ctx.lvl, ctx.params);
+    let (h, mi, lvl, params) = (ctx.h, ctx.mi, &ctx.lvl, &ctx.params);
     let (sub_x, sub_y) = if plane > 0 {
         (h.subsampling_x, h.subsampling_y)
     } else {
@@ -395,7 +519,7 @@ fn superblock(
             }
             let loop_col = ((x >> 3) >> sub_x) << sub_x;
             let loop_row = ((y >> 3) >> sub_y) << sub_y;
-            let m = &mi[(loop_row * mi_cols + loop_col) as usize];
+            let m = &mi[((loop_row - ctx.mi_row0) * mi_cols + loop_col) as usize];
             // Adaptive filter strength (8.8.4).
             let mode = m.y_mode;
             let mode_type = (mode == NEARESTMV || mode == NEARMV || mode == NEWMV) as usize;

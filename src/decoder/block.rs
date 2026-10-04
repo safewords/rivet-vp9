@@ -119,6 +119,79 @@ pub(crate) struct FrameDec<'a> {
     /// predictions of a compound block (64 x 64 each).
     pub inter_scratch: crate::dsp::inter::Scratch,
     pub pred_buf: Vec<u16>,
+    /// Parsing only: where the parsed rows go (the pipeline's), and the
+    /// row being recorded.
+    pub rec: Option<&'a RowSink>,
+    pub rec_row: RowRec,
+    /// Reconstructing a band of rows: the row above it, per plane.
+    pub above_line: [Vec<u16>; 3],
+}
+
+/// What reconstructing one coded transform block needs: its end of block,
+/// type, and how many nonzero coefficients follow in `RowRec::coefs`.
+#[derive(Clone, Copy)]
+pub(crate) struct TokRec {
+    eob: u16,
+    tx_type: u8,
+    n: u16,
+}
+
+/// A superblock row, parsed: every block's mode info (as the residual
+/// syntax sees it), the coefficients of its transform blocks in syntax
+/// order, and the row's mode info for the loop filter.
+#[derive(Default)]
+pub(crate) struct RowRec {
+    blocks: Vec<Block>,
+    /// The first block of each superblock.
+    sb_start: Vec<usize>,
+    toks: Vec<TokRec>,
+    /// (position, value) of each nonzero coefficient.
+    coefs: Vec<(u16, i32)>,
+    /// Mode info rows `8r..8r + 8` (fewer at the bottom).
+    pub mi: Vec<MiInfo>,
+}
+
+/// The parsed superblock rows, handed from the parsing thread to the
+/// reconstruction threads.
+pub(crate) struct RowSink {
+    state: std::sync::Mutex<(Vec<Option<RowRec>>, bool)>,
+    cv: std::sync::Condvar,
+}
+
+impl RowSink {
+    fn new(rows: usize) -> Self {
+        RowSink {
+            state: std::sync::Mutex::new(((0..rows).map(|_| None).collect(), false)),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn put(&self, r: usize, row: RowRec) {
+        let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        g.0[r] = Some(row);
+        self.cv.notify_all();
+    }
+
+    /// No more rows will come.
+    fn finish(&self) {
+        let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        g.1 = true;
+        self.cv.notify_all();
+    }
+
+    /// Row `r`, once parsed; `None` if parsing stopped before it.
+    fn take(&self, r: usize) -> Option<RowRec> {
+        let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(row) = g.0[r].take() {
+                return Some(row);
+            }
+            if g.1 {
+                return None;
+            }
+            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+    }
 }
 
 impl Drop for FrameDec<'_> {
@@ -180,12 +253,57 @@ impl<'a> FrameDec<'a> {
         col_start: u32,
         col_end: u32,
     ) -> Self {
+        Self::new_columns_with(
+            h,
+            seg,
+            probs,
+            counts,
+            prev_segment_ids,
+            prev_mvs,
+            refs,
+            col_start,
+            col_end,
+            true,
+        )
+    }
+
+    /// A reconstruction-only decoder: no planes and no mode info of its
+    /// own (the caller sets the planes), for replaying parsed rows.
+    fn bare(
+        h: &'a FrameHeader,
+        seg: &'a Segmentation,
+        probs: &'a mut Probs,
+        counts: &'a mut Counts,
+        refs: [Option<Arc<RefFrame>>; 3],
+    ) -> Self {
+        let mut fd = Self::new_columns_with(h, seg, probs, counts, &[], None, refs, 0, 0, false);
+        fd.mi_stride = h.mi_cols;
+        fd
+    }
+
+    /// [`FrameDec::new_columns`], with planes or (parsing only) without.
+    #[allow(clippy::too_many_arguments)]
+    fn new_columns_with(
+        h: &'a FrameHeader,
+        seg: &'a Segmentation,
+        probs: &'a mut Probs,
+        counts: &'a mut Counts,
+        prev_segment_ids: &'a [u8],
+        prev_mvs: Option<&'a [PrevMv]>,
+        refs: [Option<Arc<RefFrame>>; 3],
+        col_start: u32,
+        col_end: u32,
+        with_planes: bool,
+    ) -> Self {
         let sb_end = (col_end.div_ceil(8) * 8).min(h.sb64_cols * 8);
         let x0 = (col_start * 8) as usize;
         let w = ((sb_end - col_start) * 8) as usize;
         let ht = (h.sb64_rows * 64) as usize;
         let (sx, sy) = (h.subsampling_x as usize, h.subsampling_y as usize);
         let plane = |w: usize, h: usize, x0: usize| {
+            if !with_planes {
+                return PlaneBuf::default();
+            }
             let mut p = PlaneBuf::new(w, h);
             p.x0 = x0;
             p
@@ -233,6 +351,9 @@ impl<'a> FrameDec<'a> {
             level: crate::dsp::level(),
             inter_scratch: crate::dsp::inter::Scratch::new(),
             pred_buf: vec![0; 2 * 64 * 64],
+            rec: None,
+            rec_row: RowRec::default(),
+            above_line: Default::default(),
         }
     }
 
@@ -281,8 +402,18 @@ impl<'a> FrameDec<'a> {
             self.left_seg_pred.iter_mut().for_each(|v| *v = 0);
             let mut c = self.mi_col_start;
             while c < self.mi_col_end {
+                if self.rec.is_some() {
+                    self.rec_row.sb_start.push(self.rec_row.blocks.len());
+                }
                 self.decode_partition(d, r, c, BLOCK_64X64)?;
                 c += 8;
+            }
+            if let Some(sink) = self.rec {
+                let mut row = std::mem::take(&mut self.rec_row);
+                let end = (r + 8).min(self.mi_rows);
+                row.mi
+                    .extend_from_slice(&self.mi[self.mi_idx(r, 0)..self.mi_idx(end, 0)]);
+                sink.put((r / 8) as usize, row);
             }
             r += 8;
         }
@@ -413,6 +544,9 @@ impl<'a> FrameDec<'a> {
             self.inter_frame_mode_info(d)?;
         }
         self.eob_total = 0;
+        if self.rec.is_some() {
+            self.rec_row.blocks.push(self.b.clone());
+        }
         self.residual(d)?;
         let b = &mut self.b;
         if b.is_inter && subsize >= BLOCK_8X8 && self.eob_total == 0 {
@@ -1160,7 +1294,12 @@ impl<'a> FrameDec<'a> {
             let n4h = NUM_4X4_HIGH[plane_sz as usize] as usize;
             let base_x = ((self.b.mi_col * 8) >> sx) as usize;
             let base_y = ((self.b.mi_row * 8) >> sy) as usize;
-            if self.b.is_inter {
+            let parse = self.rec.is_some();
+            if self.b.is_inter && parse && plane == 0 {
+                // Only reconstruction predicts; its errors are found here.
+                self.check_refs()?;
+            }
+            if self.b.is_inter && !parse {
                 if self.b.mi_size < BLOCK_8X8 {
                     for y in 0..n4h {
                         for x in 0..n4w {
@@ -1189,7 +1328,7 @@ impl<'a> FrameDec<'a> {
                     let start_y = base_y + 4 * y;
                     let mut nonzero = false;
                     if start_x < max_x && start_y < max_y {
-                        if !self.b.is_inter {
+                        if !self.b.is_inter && !parse {
                             self.predict_intra(
                                 plane,
                                 start_x,
@@ -1205,7 +1344,9 @@ impl<'a> FrameDec<'a> {
                             let (eob, tx_type) =
                                 self.tokens(d, plane, start_x, start_y, tx_sz, block_idx);
                             nonzero = eob > 0;
-                            if eob > 0 {
+                            if parse {
+                                self.record(tx_sz, tx_type, eob);
+                            } else if eob > 0 {
                                 self.reconstruct(plane, start_x, start_y, tx_sz, tx_type, eob);
                             }
                         }
@@ -1220,6 +1361,137 @@ impl<'a> FrameDec<'a> {
                     x += step;
                 }
                 y += step;
+            }
+        }
+        Ok(())
+    }
+
+    /// Parsing only: keeps a transform block's coefficients for the
+    /// reconstruction, and clears them.
+    fn record(&mut self, tx_sz: u8, tx_type: u8, eob: usize) {
+        let start = self.rec_row.coefs.len();
+        for &p in &scan(tx_sz, tx_type)[..eob] {
+            let v = &mut self.coefs[p as usize];
+            if *v != 0 {
+                self.rec_row.coefs.push((p, *v));
+                *v = 0;
+            }
+        }
+        self.rec_row.toks.push(TokRec {
+            eob: eob as u16,
+            tx_type,
+            n: (self.rec_row.coefs.len() - start) as u16,
+        });
+    }
+
+    /// The errors inter prediction (8.5.2.3) would find for the block:
+    /// a missing reference, a reference scaled beyond the limits.
+    fn check_refs(&self) -> Result<()> {
+        let n = 1 + (self.b.ref_frame[1] > INTRA_FRAME) as usize;
+        for &rf in &self.b.ref_frame[..n] {
+            let r = self.refs[(rf - LAST_FRAME) as usize]
+                .as_ref()
+                .ok_or_else(|| Error::bitstream("missing reference"))?;
+            super::inter_scale(r.width, r.height, self.h.width, self.h.height)
+                .ok_or_else(|| Error::bitstream("reference frame scaled beyond 2:1 / 1:16"))?;
+        }
+        Ok(())
+    }
+
+    /// Reconstructs superblock `sb` of a parsed row: the residual syntax's
+    /// prediction and reconstruction calls, in its order, with the
+    /// recorded blocks and coefficients. `tok` and `coef` are the next
+    /// records' indices.
+    fn replay(&mut self, row: &RowRec, sb: usize, tok: &mut usize, coef: &mut usize) -> Result<()> {
+        let end = row
+            .sb_start
+            .get(sb + 1)
+            .copied()
+            .unwrap_or(row.blocks.len());
+        for bi in row.sb_start[sb]..end {
+            self.b = row.blocks[bi].clone();
+            let bsize = self.b.mi_size.max(BLOCK_8X8);
+            for plane in 0..3usize {
+                let tx_sz = if plane > 0 {
+                    self.uv_tx_size()
+                } else {
+                    self.b.tx_size
+                };
+                let step = 1usize << tx_sz;
+                let (sx, sy) = if plane > 0 {
+                    (self.ss_x, self.ss_y)
+                } else {
+                    (0, 0)
+                };
+                let plane_sz = SS_SIZE_LOOKUP[bsize as usize][sx as usize][sy as usize];
+                let n4w = NUM_4X4_WIDE[plane_sz as usize] as usize;
+                let n4h = NUM_4X4_HIGH[plane_sz as usize] as usize;
+                let base_x = ((self.b.mi_col * 8) >> sx) as usize;
+                let base_y = ((self.b.mi_row * 8) >> sy) as usize;
+                if self.b.is_inter {
+                    if self.b.mi_size < BLOCK_8X8 {
+                        for y in 0..n4h {
+                            for x in 0..n4w {
+                                self.predict_inter(
+                                    plane,
+                                    base_x + 4 * x,
+                                    base_y + 4 * y,
+                                    4,
+                                    4,
+                                    y * n4w + x,
+                                )?;
+                            }
+                        }
+                    } else {
+                        self.predict_inter(plane, base_x, base_y, n4w * 4, n4h * 4, 0)?;
+                    }
+                }
+                let max_x = ((self.mi_cols * 8) >> sx) as usize;
+                let max_y = ((self.mi_rows * 8) >> sy) as usize;
+                let mut block_idx = 0;
+                let mut y = 0;
+                while y < n4h {
+                    let mut x = 0;
+                    while x < n4w {
+                        let start_x = base_x + 4 * x;
+                        let start_y = base_y + 4 * y;
+                        if start_x < max_x && start_y < max_y {
+                            if !self.b.is_inter {
+                                self.predict_intra(
+                                    plane,
+                                    start_x,
+                                    start_y,
+                                    self.b.avail_l || x > 0,
+                                    self.b.avail_u || y > 0,
+                                    x + step < n4w,
+                                    tx_sz,
+                                    block_idx,
+                                );
+                            }
+                            if !self.b.skip {
+                                let t = row.toks[*tok];
+                                *tok += 1;
+                                for &(p, v) in &row.coefs[*coef..*coef + t.n as usize] {
+                                    self.coefs[p as usize] = v;
+                                }
+                                *coef += t.n as usize;
+                                if t.eob > 0 {
+                                    self.reconstruct(
+                                        plane,
+                                        start_x,
+                                        start_y,
+                                        tx_sz,
+                                        t.tx_type,
+                                        t.eob as usize,
+                                    );
+                                }
+                            }
+                        }
+                        block_idx += 1;
+                        x += step;
+                    }
+                    y += step;
+                }
             }
         }
         Ok(())
@@ -1590,6 +1862,185 @@ pub(crate) fn decode_tiles_parallel(
         parts.push((col, cplanes, cmi));
     }
     let (planes, mi) = assemble(h, parts);
+    Ok((planes, mi, counts, padding_ok))
+}
+
+/// A reconstructed (and filtered) band of rows, and the copy of the rows
+/// above it its loop filter changed.
+type Band = ([PlaneBuf; 3], Option<[Vec<u16>; 3]>);
+
+/// decode_tiles for a frame of one tile column, with threads: a thread
+/// parses (mode info, motion vectors, coefficients) superblock row by row
+/// and hands each row over; the other threads reconstruct the rows - each
+/// its own row of samples - and loop filter them (with `lf`).
+///
+/// Reconstruction reads nothing of the frame but the row above a block
+/// (intra prediction's edge), so a row reconstructs superblock c once the
+/// row above has reconstructed superblock c, from a copy of that row's
+/// last line handed down as it is done; the row above can then go on to
+/// loop filter its samples. The loop filter's rows run as the wavefront of
+/// `loopfilter::filter_band`. The result is the serial decode's.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decode_tiles_pipelined(
+    h: &FrameHeader,
+    seg: &Segmentation,
+    probs: &Probs,
+    prev_segment_ids: &[u8],
+    prev_mvs: Option<&[PrevMv]>,
+    refs: &[Option<Arc<RefFrame>>; 3],
+    data: &[u8],
+    threads: usize,
+    lf: Option<&crate::header::LoopFilter>,
+) -> Result<TileData> {
+    use super::loopfilter::{BandLinks, Ctx, band_rows, filter_band};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let bands = h.sb64_rows as usize;
+    let sb_cols = h.sb64_cols as usize;
+    let w = (h.sb64_cols * 64) as usize;
+    let sx = h.subsampling_x as usize;
+    let strides = [w, w >> sx, w >> sx];
+    let sink = RowSink::new(bands);
+    let lines = BandLinks::new(bands, strides, 1);
+    let lf_links = BandLinks::new(bands, strides, 8);
+    let lf_ctx = lf.map(|lf| Ctx::new(h, lf, seg, &[], 0));
+    let next = AtomicUsize::new(0);
+    let band = |k: usize| -> Option<Band> {
+        let row = sink.take(k)?;
+        let mut probs = probs.clone();
+        let mut counts = Box::<Counts>::default();
+        let mut fd = FrameDec::bare(h, seg, &mut probs, &mut counts, refs.clone());
+        for p in 0..3 {
+            let bh = band_rows(h, p);
+            fd.planes[p] = PlaneBuf::new(strides[p], bh);
+            fd.planes[p].y0 = k * bh;
+            if k > 0 {
+                fd.above_line[p] = vec![0; strides[p]];
+            }
+        }
+        let (mut copied, mut published) = ([0usize; 3], [0usize; 3]);
+        let (mut tok, mut coef) = (0, 0);
+        let sub = |p: usize| if p > 0 { sx } else { 0 };
+        for c in 0..sb_cols {
+            if k > 0 {
+                let need = [0, 1, 2].map(|p| ((64 * (c + 1)) >> sub(p)).min(strides[p]));
+                lines.receive(k - 1, need, &mut copied, &mut fd.above_line, strides, 1)?;
+            }
+            fd.replay(&row, c, &mut tok, &mut coef).ok()?;
+            if k + 1 < bands {
+                let done = [0, 1, 2].map(|p| {
+                    if c + 1 == sb_cols {
+                        strides[p]
+                    } else {
+                        (64 * (c + 1)) >> sub(p)
+                    }
+                });
+                let last = [0, 1, 2].map(|p| band_rows(h, p) - 1);
+                let src = [
+                    &fd.planes[0].data[..],
+                    &fd.planes[1].data,
+                    &fd.planes[2].data,
+                ];
+                lines.publish(k, done, &mut published, src, last, strides, 1);
+            }
+        }
+        let (mut planes, _) = fd.finish();
+        let halo = match &lf_ctx {
+            Some(ctx) => {
+                let ctx = ctx.with_mi(&row.mi, (k * 8) as u32);
+                let [py, pu, pv] = &mut planes;
+                Some(filter_band(
+                    &ctx,
+                    &lf_links,
+                    k,
+                    [&mut py.data[..], &mut pu.data[..], &mut pv.data[..]],
+                    strides,
+                )?)
+            }
+            None => None,
+        };
+        Some((planes, halo))
+    };
+    let workers = threads.saturating_sub(1).clamp(1, bands);
+    let abort = || {
+        lines.abort();
+        lf_links.abort();
+    };
+    let (parsed, mut done) = std::thread::scope(|s| {
+        let parser = s.spawn(|| {
+            let mut probs = probs.clone();
+            let mut counts = Box::<Counts>::default();
+            let mut fd = FrameDec::new_columns_with(
+                h,
+                seg,
+                &mut probs,
+                &mut counts,
+                prev_segment_ids,
+                prev_mvs,
+                refs.clone(),
+                0,
+                h.mi_cols,
+                false,
+            );
+            fd.rec = Some(&sink);
+            let res = fd.decode_tiles(data);
+            sink.finish();
+            if res.is_err() {
+                abort();
+            }
+            let padding_ok = fd.padding_ok;
+            let (_, mi) = fd.finish();
+            res.map(|_| (mi, counts, padding_ok))
+        });
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut out = Vec::new();
+                    loop {
+                        let k = next.fetch_add(1, Ordering::Relaxed);
+                        if k >= bands {
+                            break out;
+                        }
+                        match band(k) {
+                            Some(b) => out.push((k, b)),
+                            None => {
+                                abort();
+                                break out;
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        let done: Vec<(usize, Band)> = handles
+            .into_iter()
+            .flat_map(|t| t.join().expect("reconstruction worker panicked"))
+            .collect();
+        (parser.join().expect("parsing thread panicked"), done)
+    });
+    let (mi, counts, padding_ok) = parsed?;
+    if done.len() != bands {
+        return Err(Error::bitstream("reconstruction stopped"));
+    }
+    done.sort_by_key(|(k, _)| *k);
+    let ht = (h.sb64_rows * 64) as usize;
+    let sy = h.subsampling_y as usize;
+    let mut planes = [
+        PlaneBuf::new(strides[0], ht),
+        PlaneBuf::new(strides[1], ht >> sy),
+        PlaneBuf::new(strides[2], ht >> sy),
+    ];
+    for (k, (bplanes, halo)) in done {
+        for p in 0..3 {
+            let (s, bh) = (strides[p], band_rows(h, p));
+            let start = k * bh * s;
+            planes[p].data[start..start + bh * s].copy_from_slice(&bplanes[p].data);
+            if let Some(halo) = &halo
+                && k > 0
+            {
+                planes[p].data[start - 8 * s..start].copy_from_slice(&halo[p]);
+            }
+        }
+    }
     Ok((planes, mi, counts, padding_ok))
 }
 

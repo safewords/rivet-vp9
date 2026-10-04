@@ -47,8 +47,13 @@ impl FrameDec<'_> {
         let mut above = [0i32; 65];
         let mut left = [0i32; 32];
         if have_above {
-            // Row y - 1 of the buffer, indexed by plane column.
-            let row = &buf.data[buf.at(buf.x0, y - 1)..];
+            // Row y - 1, indexed by plane column: of the buffer, or above a
+            // band of rows the row handed down by the band above.
+            let row: &[u16] = if y == buf.y0 && y > 0 {
+                &self.above_line[plane][buf.x0..]
+            } else {
+                &buf.data[buf.at(buf.x0, y - 1)..]
+            };
             let row = |xx: usize| row[xx - buf.x0];
             for i in 0..size {
                 above[1 + i] = row(max_x.min(x + i)) as i32;
@@ -83,6 +88,7 @@ impl FrameDec<'_> {
             }
         }
         let off = buf.at(x, y);
+        let buf = &mut self.planes[plane];
         intra::predict(
             mode,
             log2,
