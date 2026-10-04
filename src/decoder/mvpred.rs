@@ -38,8 +38,8 @@ impl FrameDec<'_> {
 
     /// get_block_mv (6.5.10).
     fn get_block_mv(&self, s: &mut Search, r: i32, c: i32, ref_list: usize, use_prev: bool) {
-        let idx = (r as u32 * self.mi_cols + c as u32) as usize;
         if use_prev {
+            let idx = (r as u32 * self.mi_cols + c as u32) as usize;
             let p = self
                 .prev_mvs
                 .and_then(|v| v.get(idx))
@@ -48,7 +48,7 @@ impl FrameDec<'_> {
             s.cand_mv[ref_list] = p.mv[ref_list];
             s.cand_frame[ref_list] = p.ref_frame[ref_list];
         } else {
-            let m = &self.mi[idx];
+            let m = self.mi_at(r as u32, c as u32);
             s.cand_mv[ref_list] = m.mv[ref_list][3];
             s.cand_frame[ref_list] = m.ref_frame[ref_list];
         }
@@ -123,7 +123,7 @@ impl FrameDec<'_> {
             let r = mi_row + cand[0] as i32;
             let c = mi_col + cand[1] as i32;
             if self.is_inside(r, c) {
-                let m = self.mi[(r as u32 * self.mi_cols + c as u32) as usize];
+                let m = *self.mi_at(r as u32, c as u32);
                 context_counter += MODE_2_COUNTER[m.y_mode as usize] as usize;
                 for j in 0..2 {
                     if m.ref_frame[j] == ref_frame {

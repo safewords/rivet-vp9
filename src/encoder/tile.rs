@@ -141,6 +141,9 @@ pub(crate) struct TileEncoder<'a> {
     pub(crate) decisions: Vec<Decision>,
     /// Decisions to replay instead of searching, and the next one.
     pub(crate) replay: Option<(Vec<Decision>, usize)>,
+    /// The kernels' instruction set, and inter prediction's memory.
+    level: crate::dsp::Level,
+    scratch: std::cell::RefCell<inter::Scratch>,
 }
 
 /// A reference frame the motion search looks in.
@@ -214,6 +217,8 @@ impl<'a> TileEncoder<'a> {
             record: true,
             decisions: Vec::new(),
             replay: None,
+            level: crate::dsp::level(),
+            scratch: std::cell::RefCell::new(inter::Scratch::new()),
         };
         let ps = (h.sb64_cols * 64) as usize + 2 * PAD;
         let rows = (h.sb64_rows * 64) as usize + 2 * PAD;
@@ -918,6 +923,8 @@ impl<'a> TileEncoder<'a> {
         let x = (fd.b.mi_col * 8) as i32 * 16 + mv[1] * 2;
         let y = (fd.b.mi_row * 8) as i32 * 16 + mv[0] * 2;
         inter::predict(
+            self.level,
+            &mut self.scratch.borrow_mut(),
             &refp,
             x,
             y,
@@ -928,6 +935,7 @@ impl<'a> TileEncoder<'a> {
             EIGHTTAP,
             self.h.bit_depth,
             &mut buf[..w * h],
+            w,
         );
         let s = &self.src.planes[0];
         let ss = self.src.stride[0];

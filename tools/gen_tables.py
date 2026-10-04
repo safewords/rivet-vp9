@@ -46,7 +46,6 @@ spec = [
  ('dc_qlookup','DC_QLOOKUP','i32',[3,256],'`dc_qlookup` (8.6.1), indexed by `(BitDepth - 8) >> 1`.'),
  ('ac_qlookup','AC_QLOOKUP','i32',[3,256],'`ac_qlookup` (8.6.1).'),
  ('subpel_filters','SUBPEL_FILTERS','i32',[4,16,8],'`subpel_filters` (8.5.2.4), indexed by interp_filter (0 regular, 1 smooth, 2 sharp, 3 bilinear).'),
- ('cos64_lookup','COS64_LOOKUP','i32',[33],'`cos64_lookup` (8.7.1.1).'),
  ('default_scan_4x4','DEFAULT_SCAN_4X4','u16',[16],'10.1.'),
  ('col_scan_4x4','COL_SCAN_4X4','u16',[16],'10.1.'),
  ('row_scan_4x4','ROW_SCAN_4X4','u16',[16],'10.1.'),

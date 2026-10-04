@@ -46,13 +46,15 @@ fn lvl_lookup(lf: &LoopFilter, seg: &Segmentation) -> [[[u8; 2]; 4]; MAX_SEGMENT
     out
 }
 
-/// Applies the loop filter to the frame.
+/// Applies the loop filter to the frame, the planes in parallel when
+/// `threads` allows (they are filtered independently).
 pub(crate) fn filter_frame(
     h: &FrameHeader,
     lf: &LoopFilter,
     seg: &Segmentation,
     mi: &[MiInfo],
     planes: &mut [PlaneBuf; 3],
+    threads: usize,
 ) {
     let lvl = lvl_lookup(lf, seg);
     let shift = if lf.sharpness > 4 {
@@ -73,20 +75,34 @@ pub(crate) fn filter_frame(
         };
         *p = (limit, 2 * (l + 2) + limit, l >> 4);
     }
-    let mi_rows = h.mi_rows;
-    let mi_cols = h.mi_cols;
-    let mut row = 0;
-    while row < mi_rows {
-        let mut col = 0;
-        while col < mi_cols {
-            for (plane, buf) in planes.iter_mut().enumerate() {
+    let level = crate::dsp::level();
+    let one_plane = |plane: usize, buf: &mut PlaneBuf| {
+        let mut edges = lf::Edges::new();
+        let mut row = 0;
+        while row < h.mi_rows {
+            let mut col = 0;
+            while col < h.mi_cols {
                 for pass in 0..2 {
-                    superblock(h, mi, &lvl, &params, buf, plane, pass, row, col);
+                    superblock(
+                        h, mi, &lvl, &params, buf, plane, pass, row, col, level, &mut edges,
+                    );
                 }
+                col += 8;
             }
-            col += 8;
+            row += 8;
         }
-        row += 8;
+    };
+    if threads > 1 {
+        std::thread::scope(|s| {
+            let [y, u, v] = planes;
+            s.spawn(|| one_plane(1, u));
+            s.spawn(|| one_plane(2, v));
+            one_plane(0, y);
+        });
+    } else {
+        for (plane, buf) in planes.iter_mut().enumerate() {
+            one_plane(plane, buf);
+        }
     }
 }
 
@@ -101,6 +117,8 @@ fn superblock(
     pass: usize,
     row: u32,
     col: u32,
+    level: crate::dsp::Level,
+    e: &mut lf::Edges,
 ) {
     let (sub_x, sub_y) = if plane > 0 {
         (h.subsampling_x, h.subsampling_y)
@@ -115,12 +133,15 @@ fn superblock(
     let mi_rows = h.mi_rows;
     let mi_cols = h.mi_cols;
     let stride = buf.stride;
-    let step = if pass == 0 { 1 } else { stride };
     // Every decision below depends on the 8x8 block a sample's luma
     // position falls in, and a run of four samples along an edge never
     // leaves one (in any subsampling): decide once per run.
+    let n_edges = 16usize >> sub;
+    let n_runs = edge_len as usize / 4;
     for edge in 0..(16u32 >> sub) {
         for i in (0..edge_len).step_by(4) {
+            let run = (i / 4) as usize;
+            e.fs[edge as usize][run] = lf::SKIP;
             let (x, y) = if pass == 0 {
                 (col * 8 + edge * (4 << sub_x), row * 8 + (i << sub_y))
             } else {
@@ -203,20 +224,25 @@ fn superblock(
                 continue;
             }
             let (limit, blimit, thresh) = params[l as usize];
-            let pos = (y >> sub_y) as usize * stride + (x >> sub_x) as usize;
-            let along = if pass == 0 { stride } else { 1 };
-            for k in 0..4 {
-                lf::filter(
-                    &mut buf.data,
-                    pos + k * along,
-                    step,
-                    filter_size,
-                    limit,
-                    blimit,
-                    thresh,
-                    h.bit_depth,
-                );
-            }
+            let ed = edge as usize;
+            e.fs[ed][run] = filter_size as i8;
+            e.limit[ed][run] = limit as u8;
+            e.blimit[ed][run] = blimit as u8;
+            e.thresh[ed][run] = thresh as u8;
         }
     }
+    let x0 = ((col * 8) >> sub_x) as usize;
+    let y0 = ((row * 8) >> sub_y) as usize;
+    lf::filter_edges(
+        level,
+        &mut buf.data,
+        stride,
+        x0,
+        y0,
+        pass == 0,
+        n_edges,
+        n_runs,
+        e,
+        h.bit_depth,
+    );
 }

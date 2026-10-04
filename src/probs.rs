@@ -111,6 +111,53 @@ pub(crate) struct Counts {
     pub more_coefs: CoefCounts<2>,
 }
 
+/// Element-wise addition of counts.
+trait Accumulate {
+    fn accumulate(&mut self, o: &Self);
+}
+
+impl Accumulate for u32 {
+    fn accumulate(&mut self, o: &Self) {
+        *self += *o;
+    }
+}
+
+impl<T: Accumulate, const N: usize> Accumulate for [T; N] {
+    fn accumulate(&mut self, o: &Self) {
+        for (a, b) in self.iter_mut().zip(o) {
+            a.accumulate(b);
+        }
+    }
+}
+
+impl Counts {
+    /// Adds `o`'s counts to these (the counts of another tile column).
+    pub(crate) fn add(&mut self, o: &Counts) {
+        self.intra_mode.accumulate(&o.intra_mode);
+        self.uv_mode.accumulate(&o.uv_mode);
+        self.partition.accumulate(&o.partition);
+        self.interp_filter.accumulate(&o.interp_filter);
+        self.inter_mode.accumulate(&o.inter_mode);
+        self.tx.accumulate(&o.tx);
+        self.is_inter.accumulate(&o.is_inter);
+        self.comp_mode.accumulate(&o.comp_mode);
+        self.single_ref.accumulate(&o.single_ref);
+        self.comp_ref.accumulate(&o.comp_ref);
+        self.skip.accumulate(&o.skip);
+        self.mv_joint.accumulate(&o.mv_joint);
+        self.mv_sign.accumulate(&o.mv_sign);
+        self.mv_class.accumulate(&o.mv_class);
+        self.mv_class0_bit.accumulate(&o.mv_class0_bit);
+        self.mv_class0_fr.accumulate(&o.mv_class0_fr);
+        self.mv_class0_hp.accumulate(&o.mv_class0_hp);
+        self.mv_bits.accumulate(&o.mv_bits);
+        self.mv_fr.accumulate(&o.mv_fr);
+        self.mv_hp.accumulate(&o.mv_hp);
+        self.token.accumulate(&o.token);
+        self.more_coefs.accumulate(&o.more_coefs);
+    }
+}
+
 const COUNT_SAT: u32 = 20;
 const MAX_UPDATE_FACTOR: u32 = 128;
 

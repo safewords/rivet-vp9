@@ -18,16 +18,19 @@ use crate::probs::{self, Counts, Probs};
 use crate::superframe;
 use crate::{Error, Result};
 
-pub(crate) use block::{FrameDec, MiInfo};
+pub(crate) use block::{FrameDec, MiInfo, TileData};
 
 /// The default limit of [`Decoder::set_max_pixels`]: 8192 x 8192.
 pub const DEFAULT_MAX_PIXELS: u64 = 8192 * 8192;
 
-/// One plane of samples, allocated to whole superblocks.
+/// One plane of samples, allocated to whole superblocks: the frame's, or
+/// the columns of one tile column (`x0` its first).
 #[derive(Clone)]
 pub(crate) struct PlaneBuf {
     pub data: Vec<u16>,
     pub stride: usize,
+    /// The plane column of `data`'s first column.
+    pub x0: usize,
 }
 
 impl PlaneBuf {
@@ -35,7 +38,14 @@ impl PlaneBuf {
         PlaneBuf {
             data: vec![0; w * h],
             stride: w,
+            x0: 0,
         }
+    }
+
+    /// The index of the sample at plane column `x`, row `y`.
+    #[inline(always)]
+    pub(crate) fn at(&self, x: usize, y: usize) -> usize {
+        y * self.stride + x - self.x0
     }
 }
 
@@ -113,6 +123,8 @@ pub struct Decoder {
     /// The stream sizes chroma transforms as 4:2:0 although it is not
     /// (FrameHeader::legacy_uv), as its last intra frame showed.
     legacy_uv: bool,
+    /// Threads to use (0: one per available core).
+    threads: usize,
 }
 
 impl Default for Decoder {
@@ -141,7 +153,20 @@ impl Decoder {
             frames: 0,
             max_pixels: DEFAULT_MAX_PIXELS,
             legacy_uv: false,
+            threads: 0,
         }
+    }
+
+    /// Decodes with up to `threads` threads: 1 decodes on the calling
+    /// thread only, 0 (the default) uses one per available core. The output
+    /// is the same with any number.
+    pub fn set_threads(&mut self, threads: usize) {
+        self.threads = threads;
+    }
+
+    /// The number of threads decoding uses.
+    pub fn threads(&self) -> usize {
+        effective_threads(self.threads)
     }
 
     /// Refuses frames of more than `pixels` luma samples (width x height)
@@ -272,7 +297,9 @@ impl Decoder {
         // the legacy rules parse it cleanly; inter frames follow.
         let non420 = (h.subsampling_x, h.subsampling_y) != (1, 1);
         h.legacy_uv = non420 && !h.frame_is_intra && self.legacy_uv;
+        let threads = effective_threads(self.threads);
         let mut decoded = decode_tile_data(
+            threads,
             &h,
             &seg,
             &mut probs,
@@ -286,6 +313,7 @@ impl Decoder {
                 let mut legacy = h.clone();
                 legacy.legacy_uv = true;
                 let retry = decode_tile_data(
+                    threads,
                     &legacy,
                     &seg,
                     &mut probs,
@@ -305,7 +333,7 @@ impl Decoder {
         let mut planes = planes;
         // Loop filter (8.8).
         if lf.level != 0 {
-            loopfilter::filter_frame(&h, &lf, &seg, &mi, &mut planes);
+            loopfilter::filter_frame(&h, &lf, &seg, &mi, &mut planes, threads);
         }
         // Backward adaptation (refresh_probs, 6.1.2).
         if !h.error_resilient_mode && !h.frame_parallel_decoding_mode {
@@ -372,12 +400,19 @@ impl Decoder {
     }
 }
 
-/// What decoding a frame's tiles gives: the planes, the mode info, the
-/// symbol counts, and whether every tile's padding was zero.
-type TileData = ([PlaneBuf; 3], Vec<MiInfo>, Box<Counts>, bool);
+/// `threads` as set: 0 is one per available core.
+pub(crate) fn effective_threads(threads: usize) -> usize {
+    if threads == 0 {
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    } else {
+        threads
+    }
+}
 
 /// Decodes the tile data of a frame (6.4) with header `h`.
+#[allow(clippy::too_many_arguments)]
 fn decode_tile_data(
+    threads: usize,
     h: &FrameHeader,
     seg: &header::Segmentation,
     probs: &mut Probs,
@@ -386,6 +421,18 @@ fn decode_tile_data(
     refs: &[Option<Arc<RefFrame>>; 3],
     data: &[u8],
 ) -> Result<TileData> {
+    if threads > 1 && h.tile_cols_log2 > 0 {
+        return block::decode_tiles_parallel(
+            h,
+            seg,
+            probs,
+            prev_segment_ids,
+            prev_mvs,
+            refs,
+            data,
+            threads,
+        );
+    }
     let mut counts = Box::<Counts>::default();
     let mut fd = block::FrameDec::new(
         h,

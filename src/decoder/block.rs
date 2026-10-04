@@ -85,7 +85,11 @@ pub(crate) struct FrameDec<'a> {
     /// The LAST, GOLDEN and ALTREF frames.
     pub refs: [Option<Arc<RefFrame>>; 3],
     pub planes: [PlaneBuf; 3],
+    /// The mode info of the frame, or of one tile column: `mi_stride`
+    /// columns from `mi_x0` ([`FrameDec::mi_idx`]).
     pub mi: Vec<MiInfo>,
+    pub mi_stride: u32,
+    pub mi_x0: u32,
     pub mi_cols: u32,
     pub mi_rows: u32,
     pub ss_x: u32,
@@ -109,6 +113,12 @@ pub(crate) struct FrameDec<'a> {
     pub token_cache: Vec<u8>,
     /// Whether every tile decoded so far ended with zero padding (9.2.3).
     pub padding_ok: bool,
+    /// The kernels' instruction set.
+    pub level: crate::dsp::Level,
+    /// Working memory of inter prediction: the filter's, and the two
+    /// predictions of a compound block (64 x 64 each).
+    pub inter_scratch: crate::dsp::inter::Scratch,
+    pub pred_buf: Vec<u16>,
 }
 
 /// Probability of node `node` of the token tree (pareto, 9.3.2).
@@ -136,14 +146,49 @@ impl<'a> FrameDec<'a> {
         prev_mvs: Option<&'a [PrevMv]>,
         refs: [Option<Arc<RefFrame>>; 3],
     ) -> Self {
-        let w = (h.sb64_cols * 64) as usize;
+        Self::new_columns(
+            h,
+            seg,
+            probs,
+            counts,
+            prev_segment_ids,
+            prev_mvs,
+            refs,
+            0,
+            h.mi_cols,
+        )
+    }
+
+    /// A decoder for the mode info columns `col_start..col_end` (a tile
+    /// column) only: its planes and mode info cover those columns (rounded
+    /// out to whole superblocks), all rows.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_columns(
+        h: &'a FrameHeader,
+        seg: &'a Segmentation,
+        probs: &'a mut Probs,
+        counts: &'a mut Counts,
+        prev_segment_ids: &'a [u8],
+        prev_mvs: Option<&'a [PrevMv]>,
+        refs: [Option<Arc<RefFrame>>; 3],
+        col_start: u32,
+        col_end: u32,
+    ) -> Self {
+        let sb_end = (col_end.div_ceil(8) * 8).min(h.sb64_cols * 8);
+        let x0 = (col_start * 8) as usize;
+        let w = ((sb_end - col_start) * 8) as usize;
         let ht = (h.sb64_rows * 64) as usize;
         let (sx, sy) = (h.subsampling_x as usize, h.subsampling_y as usize);
+        let plane = |w: usize, h: usize, x0: usize| PlaneBuf {
+            x0,
+            ..PlaneBuf::new(w, h)
+        };
         let planes = [
-            PlaneBuf::new(w, ht),
-            PlaneBuf::new(w >> sx, ht >> sy),
-            PlaneBuf::new(w >> sx, ht >> sy),
+            plane(w, ht, x0),
+            plane(w >> sx, ht >> sy, x0 >> sx),
+            plane(w >> sx, ht >> sy, x0 >> sx),
         ];
+        let mi_stride = col_end - col_start;
         let n4w = (h.sb64_cols * 16) as usize + 16;
         let n4h = (h.sb64_rows * 16) as usize + 16;
         FrameDec {
@@ -155,7 +200,9 @@ impl<'a> FrameDec<'a> {
             prev_mvs,
             refs,
             planes,
-            mi: vec![MiInfo::default(); (h.mi_rows * h.mi_cols) as usize],
+            mi: vec![MiInfo::default(); (h.mi_rows * mi_stride) as usize],
+            mi_stride,
+            mi_x0: col_start,
             mi_cols: h.mi_cols,
             mi_rows: h.mi_rows,
             ss_x: h.subsampling_x,
@@ -176,6 +223,9 @@ impl<'a> FrameDec<'a> {
             coefs: vec![0; 1024],
             token_cache: vec![0; 1024],
             padding_ok: true,
+            level: crate::dsp::level(),
+            inter_scratch: crate::dsp::inter::Scratch::new(),
+            pred_buf: vec![0; 2 * 64 * 64],
         }
     }
 
@@ -185,47 +235,28 @@ impl<'a> FrameDec<'a> {
 
     /// decode_tiles( sz ) (6.4).
     pub(crate) fn decode_tiles(&mut self, data: &[u8]) -> Result<()> {
-        let tile_cols = 1u32 << self.h.tile_cols_log2;
-        let tile_rows = 1u32 << self.h.tile_rows_log2;
         // clear_above_context()
         for p in self.above_nonzero.iter_mut() {
             p.iter_mut().for_each(|v| *v = 0);
         }
         self.above_partition.iter_mut().for_each(|v| *v = 0);
         self.above_seg_pred.iter_mut().for_each(|v| *v = 0);
-        let mut pos = 0usize;
-        for tile_row in 0..tile_rows {
-            for tile_col in 0..tile_cols {
-                let last = tile_row == tile_rows - 1 && tile_col == tile_cols - 1;
-                let size = if last {
-                    data.len() - pos
-                } else {
-                    if pos + 4 > data.len() {
-                        return Err(Error::bitstream("tile size runs past the end of the frame"));
-                    }
-                    let s = u32::from_be_bytes([
-                        data[pos],
-                        data[pos + 1],
-                        data[pos + 2],
-                        data[pos + 3],
-                    ]) as usize;
-                    pos += 4;
-                    s
-                };
-                if pos + size > data.len() {
-                    return Err(Error::bitstream("tile runs past the end of the frame"));
-                }
-                let tile = &data[pos..pos + size];
-                pos += size;
-                self.mi_row_start = tile_offset(tile_row, self.mi_rows, self.h.tile_rows_log2);
-                self.mi_row_end = tile_offset(tile_row + 1, self.mi_rows, self.h.tile_rows_log2);
-                self.mi_col_start = tile_offset(tile_col, self.mi_cols, self.h.tile_cols_log2);
-                self.mi_col_end = tile_offset(tile_col + 1, self.mi_cols, self.h.tile_cols_log2);
-                let mut d = BoolDecoder::new(tile)?;
-                self.decode_tile(&mut d)?;
-                self.padding_ok &= d.padding_is_zero();
-            }
+        let (tiles, err) = split_tiles(self.h, data);
+        for t in tiles {
+            self.decode_one_tile(&t)?;
         }
+        err.map_or(Ok(()), Err)
+    }
+
+    /// Decodes one tile (its bounds, then decode_tile).
+    fn decode_one_tile(&mut self, t: &Tile) -> Result<()> {
+        self.mi_row_start = tile_offset(t.row, self.mi_rows, self.h.tile_rows_log2);
+        self.mi_row_end = tile_offset(t.row + 1, self.mi_rows, self.h.tile_rows_log2);
+        self.mi_col_start = tile_offset(t.col, self.mi_cols, self.h.tile_cols_log2);
+        self.mi_col_end = tile_offset(t.col + 1, self.mi_cols, self.h.tile_cols_log2);
+        let mut d = BoolDecoder::new(t.data)?;
+        self.decode_tile(&mut d)?;
+        self.padding_ok &= d.padding_is_zero();
         Ok(())
     }
 
@@ -326,9 +357,15 @@ impl<'a> FrameDec<'a> {
         Ok(())
     }
 
+    /// The index in `mi` of mode info row `r`, column `c`.
+    #[inline(always)]
+    pub(crate) fn mi_idx(&self, r: u32, c: u32) -> usize {
+        (r * self.mi_stride + c - self.mi_x0) as usize
+    }
+
     #[inline]
     pub(crate) fn mi_at(&self, r: u32, c: u32) -> &MiInfo {
-        &self.mi[(r * self.mi_cols + c) as usize]
+        &self.mi[self.mi_idx(r, c)]
     }
 
     fn decode_block(&mut self, d: &mut BoolDecoder, r: u32, c: u32, subsize: u8) -> Result<()> {
@@ -385,10 +422,9 @@ impl<'a> FrameDec<'a> {
         let bh = NUM_8X8_HIGH[subsize as usize] as u32;
         let bw = NUM_8X8_WIDE[subsize as usize] as u32;
         for y in r..(r + bh).min(self.mi_rows) {
-            let row = (y * self.mi_cols) as usize;
-            for x in c..(c + bw).min(self.mi_cols) {
-                self.mi[row + x as usize] = info;
-            }
+            let row = self.mi_idx(y, c);
+            let n = ((c + bw).min(self.mi_cols) - c) as usize;
+            self.mi[row..row + n].fill(info);
         }
         Ok(())
     }
@@ -1343,6 +1379,185 @@ fn read_coef(d: &mut BoolDecoder, token: u8, bit_depth: u32) -> i32 {
         coef += bit << (num_extra - 1 - e);
     }
     coef
+}
+
+/// One tile of a frame's tile data.
+pub(crate) struct Tile<'d> {
+    pub row: u32,
+    pub col: u32,
+    pub data: &'d [u8],
+}
+
+/// The tiles of a frame's tile data, in bitstream order (6.4), and the
+/// error that ends the list early if a tile size runs past the end.
+pub(crate) fn split_tiles<'d>(h: &FrameHeader, data: &'d [u8]) -> (Vec<Tile<'d>>, Option<Error>) {
+    let tile_cols = 1u32 << h.tile_cols_log2;
+    let tile_rows = 1u32 << h.tile_rows_log2;
+    let mut out = Vec::with_capacity((tile_cols * tile_rows) as usize);
+    let mut pos = 0usize;
+    for row in 0..tile_rows {
+        for col in 0..tile_cols {
+            let last = row == tile_rows - 1 && col == tile_cols - 1;
+            let size = if last {
+                data.len() - pos
+            } else {
+                if pos + 4 > data.len() {
+                    return (
+                        out,
+                        Some(Error::bitstream("tile size runs past the end of the frame")),
+                    );
+                }
+                let s = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
+                pos += 4;
+                s
+            };
+            if pos + size > data.len() {
+                return (
+                    out,
+                    Some(Error::bitstream("tile runs past the end of the frame")),
+                );
+            }
+            out.push(Tile {
+                row,
+                col,
+                data: &data[pos..pos + size],
+            });
+            pos += size;
+        }
+    }
+    (out, None)
+}
+
+/// What decoding a frame's tiles gives: the planes, the mode info, the
+/// symbol counts, and whether every tile's padding was zero.
+pub(crate) type TileData = ([PlaneBuf; 3], Vec<MiInfo>, Box<Counts>, bool);
+
+/// decode_tiles with the tile columns decoded in parallel, on up to
+/// `threads` threads: each column by its own [`FrameDec`] over the
+/// column's samples and mode info, all of its tile rows in order. A tile
+/// column reads nothing of another (6.4: availability, motion vector
+/// candidates and contexts stop at its edges), so the result is the serial
+/// decode's: the columns are copied into the frame, the counts summed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn decode_tiles_parallel(
+    h: &FrameHeader,
+    seg: &Segmentation,
+    probs: &Probs,
+    prev_segment_ids: &[u8],
+    prev_mvs: Option<&[PrevMv]>,
+    refs: &[Option<Arc<RefFrame>>; 3],
+    data: &[u8],
+    threads: usize,
+) -> Result<TileData> {
+    let tile_cols = 1usize << h.tile_cols_log2;
+    let (tiles, size_err) = split_tiles(h, data);
+    let workers = threads.clamp(1, tile_cols);
+    // A column's result, and the index of its tile that failed.
+    type Column = (u32, Result<TileData>, Option<usize>);
+    let columns: Vec<Column> = std::thread::scope(|s| {
+        let handles: Vec<_> = (0..workers)
+            .map(|w| {
+                let tiles = &tiles;
+                s.spawn(move || {
+                    let mut out: Vec<Column> = Vec::new();
+                    for col in (w..tile_cols).step_by(workers) {
+                        let col = col as u32;
+                        let start = tile_offset(col, h.mi_cols, h.tile_cols_log2);
+                        let end = tile_offset(col + 1, h.mi_cols, h.tile_cols_log2);
+                        let mut probs = probs.clone();
+                        let mut counts = Box::<Counts>::default();
+                        let mut fd = FrameDec::new_columns(
+                            h,
+                            seg,
+                            &mut probs,
+                            &mut counts,
+                            prev_segment_ids,
+                            prev_mvs,
+                            refs.clone(),
+                            start,
+                            end,
+                        );
+                        let mut failed = None;
+                        let mut res = Ok(());
+                        for (i, t) in tiles.iter().enumerate().filter(|(_, t)| t.col == col) {
+                            if let Err(e) = fd.decode_one_tile(t) {
+                                failed = Some(i);
+                                res = Err(e);
+                                break;
+                            }
+                        }
+                        let padding_ok = fd.padding_ok;
+                        let (planes, mi) = fd.finish();
+                        out.push((col, res.map(|_| (planes, mi, counts, padding_ok)), failed));
+                    }
+                    out
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("tile worker panicked"))
+            .collect()
+    });
+    // The first error in bitstream order is the serial decode's.
+    let mut first: Option<(usize, Error)> = None;
+    let mut ok = Vec::with_capacity(columns.len());
+    for (col, res, failed) in columns {
+        match res {
+            Ok(d) => ok.push((col, d)),
+            Err(e) => {
+                let i = failed.unwrap_or(usize::MAX);
+                if first.as_ref().is_none_or(|(j, _)| i < *j) {
+                    first = Some((i, e));
+                }
+            }
+        }
+    }
+    if let Some((_, e)) = first {
+        return Err(e);
+    }
+    if let Some(e) = size_err {
+        return Err(e);
+    }
+    // Assemble the frame.
+    let w = (h.sb64_cols * 64) as usize;
+    let ht = (h.sb64_rows * 64) as usize;
+    let (sx, sy) = (h.subsampling_x as usize, h.subsampling_y as usize);
+    let mut planes = [
+        PlaneBuf::new(w, ht),
+        PlaneBuf::new(w >> sx, ht >> sy),
+        PlaneBuf::new(w >> sx, ht >> sy),
+    ];
+    let mut mi = vec![MiInfo::default(); (h.mi_rows * h.mi_cols) as usize];
+    let mut counts = Box::<Counts>::default();
+    let mut padding_ok = true;
+    for (col, (cplanes, cmi, ccounts, cpad)) in ok {
+        for (dst, src) in planes.iter_mut().zip(&cplanes) {
+            let cw = src.stride;
+            for (drow, srow) in dst
+                .data
+                .chunks_exact_mut(dst.stride)
+                .zip(src.data.chunks_exact(cw))
+            {
+                drow[src.x0..src.x0 + cw].copy_from_slice(srow);
+            }
+        }
+        let start = tile_offset(col, h.mi_cols, h.tile_cols_log2) as usize;
+        let end = tile_offset(col + 1, h.mi_cols, h.tile_cols_log2) as usize;
+        let cw = end - start;
+        if cw > 0 {
+            for (drow, srow) in mi
+                .chunks_exact_mut(h.mi_cols as usize)
+                .zip(cmi.chunks_exact(cw))
+            {
+                drow[start..end].copy_from_slice(srow);
+            }
+        }
+        counts.add(&ccounts);
+        padding_ok &= cpad;
+    }
+    Ok((planes, mi, counts, padding_ok))
 }
 
 /// get_tile_offset (6.4.1).

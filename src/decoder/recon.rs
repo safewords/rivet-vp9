@@ -8,7 +8,7 @@
 use super::block::FrameDec;
 use super::inter_scale;
 use crate::consts::*;
-use crate::dsp::{inter, intra, itx};
+use crate::dsp::{inter, intra, itx, pixel};
 use crate::tables::*;
 use crate::{Error, Result};
 
@@ -47,13 +47,15 @@ impl FrameDec<'_> {
         let mut above = [0i32; 65];
         let mut left = [0i32; 32];
         if have_above {
-            let row = &buf.data[(y - 1) * stride..y * stride];
+            // Row y - 1 of the buffer, indexed by plane column.
+            let row = &buf.data[buf.at(buf.x0, y - 1)..];
+            let row = |xx: usize| row[xx - buf.x0];
             for i in 0..size {
-                above[1 + i] = row[max_x.min(x + i)] as i32;
+                above[1 + i] = row(max_x.min(x + i)) as i32;
             }
             if not_on_right && tx_sz == TX_4X4 {
                 for i in size..2 * size {
-                    above[1 + i] = row[max_x.min(x + i)] as i32;
+                    above[1 + i] = row(max_x.min(x + i)) as i32;
                 }
             } else {
                 for i in size..2 * size {
@@ -61,7 +63,7 @@ impl FrameDec<'_> {
                 }
             }
             above[0] = if have_left {
-                row[max_x.min(x - 1)] as i32
+                row(max_x.min(x - 1)) as i32
             } else {
                 base + 1
             };
@@ -73,14 +75,14 @@ impl FrameDec<'_> {
         }
         if have_left {
             for (i, l) in left.iter_mut().enumerate().take(size) {
-                *l = buf.data[max_y.min(y + i) * stride + x - 1] as i32;
+                *l = buf.data[buf.at(x - 1, max_y.min(y + i))] as i32;
             }
         } else {
             for l in left.iter_mut().take(size) {
                 *l = base + 1;
             }
         }
-        let off = y * stride + x;
+        let off = buf.at(x, y);
         intra::predict(
             mode,
             log2,
@@ -105,7 +107,6 @@ impl FrameDec<'_> {
         block_idx: usize,
     ) -> Result<()> {
         let is_compound = self.b.ref_frame[1] > INTRA_FRAME;
-        let mut preds = [[0u16; 64 * 64]; 2];
         for ref_list in 0..1 + is_compound as usize {
             // Motion vector selection (8.5.2.1).
             let bm = &self.b.block_mvs[ref_list];
@@ -167,7 +168,18 @@ impl FrameDec<'_> {
                 last_x,
                 last_y,
             };
+            // A single prediction goes straight into the frame; a compound
+            // one's two into the scratch buffer, then averaged.
+            let (out, out_stride) = if is_compound {
+                (&mut self.pred_buf[ref_list * 64 * 64..][..w * h], w)
+            } else {
+                let buf = &mut self.planes[plane];
+                let at = buf.at(x, y);
+                (&mut buf.data[at..], buf.stride)
+            };
             inter::predict(
+                self.level,
+                &mut self.inter_scratch,
                 &refp,
                 start_x,
                 start_y,
@@ -177,21 +189,23 @@ impl FrameDec<'_> {
                 h,
                 self.b.interp_filter,
                 self.bit_depth,
-                &mut preds[ref_list][..w * h],
+                out,
+                out_stride,
             );
         }
-        let buf = &mut self.planes[plane];
-        let stride = buf.stride;
-        for i in 0..h {
-            let row = &mut buf.data[(y + i) * stride + x..(y + i) * stride + x + w];
-            if is_compound {
-                for j in 0..w {
-                    row[j] =
-                        ((preds[0][i * w + j] as u32 + preds[1][i * w + j] as u32 + 1) >> 1) as u16;
-                }
-            } else {
-                row.copy_from_slice(&preds[0][i * w..i * w + w]);
-            }
+        if is_compound {
+            let buf = &mut self.planes[plane];
+            let (p0, p1) = self.pred_buf.split_at(64 * 64);
+            let at = buf.at(x, y);
+            pixel::avg(
+                self.level,
+                &p0[..w * h],
+                &p1[..w * h],
+                w,
+                h,
+                &mut buf.data[at..],
+                buf.stride,
+            );
         }
         Ok(())
     }
@@ -217,7 +231,7 @@ impl FrameDec<'_> {
         y: usize,
         tx_sz: u8,
         tx_type: u8,
-        _eob: usize,
+        eob: usize,
     ) {
         let bd_idx = ((self.bit_depth - 8) >> 1) as usize;
         let q = self.qindex();
@@ -238,18 +252,19 @@ impl FrameDec<'_> {
                 *v = ((*v as i64 * qq) / dq_denom).clamp(i32::MIN as i64, i32::MAX as i64) as i32;
             }
         }
-        itx::inverse_transform_2d(block, n, tx_type, self.h.lossless);
-        let max = (1i32 << self.bit_depth) - 1;
         let buf = &mut self.planes[plane];
-        let stride = buf.stride;
-        for i in 0..n0 {
-            let row = &mut buf.data[(y + i) * stride + x..(y + i) * stride + x + n0];
-            for j in 0..n0 {
-                row[j] = (row[j] as i32)
-                    .saturating_add(block[i * n0 + j])
-                    .clamp(0, max) as u16;
-            }
-        }
+        let (stride, at) = (buf.stride, buf.at(x, y));
+        itx::inverse_transform_add(
+            self.level,
+            block,
+            n,
+            tx_type,
+            self.h.lossless,
+            eob,
+            self.bit_depth,
+            &mut buf.data[at..],
+            stride,
+        );
         block.iter_mut().for_each(|v| *v = 0);
     }
 }

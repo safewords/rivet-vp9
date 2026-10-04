@@ -439,7 +439,7 @@ impl Encoder {
                 ..Default::default()
             };
             if lf.level != 0 {
-                crate::decoder::loopfilter::filter_frame(h, &lf, &seg, &mi, &mut planes);
+                crate::decoder::loopfilter::filter_frame(h, &lf, &seg, &mi, &mut planes, 1);
             }
             Some(planes)
         } else {
