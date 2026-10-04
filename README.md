@@ -304,6 +304,21 @@ over the next second.
   through the decoder's inverse; scans are permutations; the subpixel
   filters sum to 128.
 
+### NEON on ARM hardware
+
+CI runs on x86-64 Linux only, so the NEON (aarch64) code paths are not tested
+there. They are verified by hand on ARM hardware (an aarch64 Linux machine,
+or Apple silicon) after a change to them and before a release:
+
+```sh
+VP9_REQUIRE_SIMD=1 cargo test --release
+VP9_FORCE_SCALAR=1 cargo test --release
+```
+
+The first run checks the NEON kernels bit-exact against the scalar ones; the
+second runs everything on the scalar kernels. The test vectors can be run
+the same way, as the `vectors` job in `.github/workflows/ci.yml` does.
+
 ## Provenance and licensing
 
 Written from the specification's text; **no VP9 implementation's source was
