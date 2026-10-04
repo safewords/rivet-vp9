@@ -168,10 +168,10 @@ impl Edges {
     }
 }
 
-/// Filters the edges of one pass over the region at (`x0`, `y0`) of `buf`
-/// (plane coordinates, row stride `stride`): `vertical` edges are at `x0 +
-/// 4e` and runs at rows `y0 + 4r`; horizontal edges at `y0 + 4e` and runs
-/// at columns `x0 + 4r`. Edges are filtered in order (left to right, top to
+/// Filters edges `first..n_edges` of one pass over the region at (`x0`,
+/// `y0`) of `buf` (row stride `stride`): `vertical` edges are at `x0 + 4e`
+/// and runs at rows `y0 + 4r`; horizontal edges at `y0 + 4e` and runs at
+/// columns `x0 + 4r`. Edges are filtered in order (left to right, top to
 /// bottom), as the specification's loop does; positions along an edge are
 /// independent.
 #[allow(clippy::too_many_arguments)]
@@ -182,6 +182,7 @@ pub(crate) fn filter_edges(
     x0: usize,
     y0: usize,
     vertical: bool,
+    first: usize,
     n_edges: usize,
     n_runs: usize,
     e: &Edges,
@@ -192,14 +193,18 @@ pub(crate) fn filter_edges(
         Level::Avx2 | Level::Sse41 if n_runs.is_multiple_of(2) => {
             // SAFETY: SSE4.1 is present at these levels.
             unsafe {
-                super::x86::lf_sse41(buf, stride, x0, y0, vertical, n_edges, n_runs, e, bit_depth)
+                super::x86::lf_sse41(
+                    buf, stride, x0, y0, vertical, first, n_edges, n_runs, e, bit_depth,
+                )
             }
         }
         #[cfg(target_arch = "aarch64")]
         Level::Neon if n_runs.is_multiple_of(2) => edges_simd::<super::neon::V16x8>(
-            buf, stride, x0, y0, vertical, n_edges, n_runs, e, bit_depth,
+            buf, stride, x0, y0, vertical, first, n_edges, n_runs, e, bit_depth,
         ),
-        _ => edges_scalar(buf, stride, x0, y0, vertical, n_edges, n_runs, e, bit_depth),
+        _ => edges_scalar(
+            buf, stride, x0, y0, vertical, first, n_edges, n_runs, e, bit_depth,
+        ),
     }
 }
 
@@ -210,13 +215,14 @@ pub(crate) fn edges_scalar(
     x0: usize,
     y0: usize,
     vertical: bool,
+    first: usize,
     n_edges: usize,
     n_runs: usize,
     e: &Edges,
     bit_depth: u32,
 ) {
     let (step, along) = if vertical { (1, stride) } else { (stride, 1) };
-    for ed in 0..n_edges {
+    for ed in first..n_edges {
         for r in 0..n_runs {
             let fs = e.fs[ed][r];
             if fs == SKIP {
@@ -446,6 +452,7 @@ pub(crate) fn edges_simd<V: V16>(
     x0: usize,
     y0: usize,
     vertical: bool,
+    first: usize,
     n_edges: usize,
     n_runs: usize,
     e: &Edges,
@@ -456,7 +463,7 @@ pub(crate) fn edges_simd<V: V16>(
     if vertical {
         for g in (0..n_runs).step_by(2) {
             let y = y0 + 4 * g;
-            for ed in 0..n_edges {
+            for ed in first..n_edges {
                 let Some(p) = params::<V>(e, ed, g, sh) else {
                     continue;
                 };
@@ -491,7 +498,7 @@ pub(crate) fn edges_simd<V: V16>(
             }
         }
     } else {
-        for ed in 0..n_edges {
+        for ed in first..n_edges {
             let y = y0 + 4 * ed;
             for g in (0..n_runs).step_by(2) {
                 let Some(p) = params::<V>(e, ed, g, sh) else {
@@ -598,10 +605,10 @@ mod tests {
                 let n_edges = if iter % 4 == 0 { 8 } else { 16 };
                 for vertical in [true, false] {
                     let mut want = pic.clone();
-                    edges_scalar(&mut want, w, 16, 16, vertical, n_edges, n_runs, &e, bd);
+                    edges_scalar(&mut want, w, 16, 16, vertical, 0, n_edges, n_runs, &e, bd);
                     for &l in &levels {
                         let mut got = pic.clone();
-                        filter_edges(l, &mut got, w, 16, 16, vertical, n_edges, n_runs, &e, bd);
+                        filter_edges(l, &mut got, w, 16, 16, vertical, 0, n_edges, n_runs, &e, bd);
                         if let Some(i) = (0..got.len()).find(|&i| got[i] != want[i]) {
                             panic!(
                                 "{l:?} {bd}-bit vertical {vertical} iter {iter}: first difference at ({}, {}): {} vs {}",

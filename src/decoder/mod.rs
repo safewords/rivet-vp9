@@ -7,6 +7,7 @@
 pub(crate) mod block;
 pub(crate) mod loopfilter;
 mod mvpred;
+pub(crate) mod pool;
 mod recon;
 
 use std::sync::Arc;
@@ -24,8 +25,9 @@ pub(crate) use block::{FrameDec, MiInfo, TileData};
 pub const DEFAULT_MAX_PIXELS: u64 = 8192 * 8192;
 
 /// One plane of samples, allocated to whole superblocks: the frame's, or
-/// the columns of one tile column (`x0` its first).
-#[derive(Clone)]
+/// the columns of one tile column (`x0` its first). Its buffer goes back
+/// to the [`pool`] when it is dropped.
+#[derive(Clone, Default)]
 pub(crate) struct PlaneBuf {
     pub data: Vec<u16>,
     pub stride: usize,
@@ -36,7 +38,7 @@ pub(crate) struct PlaneBuf {
 impl PlaneBuf {
     pub(crate) fn new(w: usize, h: usize) -> Self {
         PlaneBuf {
-            data: vec![0; w * h],
+            data: pool::samples(w * h),
             stride: w,
             x0: 0,
         }
@@ -46,6 +48,12 @@ impl PlaneBuf {
     #[inline(always)]
     pub(crate) fn at(&self, x: usize, y: usize) -> usize {
         y * self.stride + x - self.x0
+    }
+}
+
+impl Drop for PlaneBuf {
+    fn drop(&mut self) {
+        pool::give_samples(std::mem::take(&mut self.data));
     }
 }
 
@@ -373,6 +381,7 @@ impl Decoder {
             ref_frame: m.ref_frame,
             mv: [m.mv[0][3], m.mv[1][3]],
         }));
+        pool::give_modes(mi);
         // Reference update (8.10 step 1).
         let cur = Arc::new(RefFrame {
             width: h.width,

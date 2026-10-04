@@ -562,12 +562,15 @@ pub(crate) unsafe fn lf_sse41(
     x0: usize,
     y0: usize,
     vertical: bool,
+    first: usize,
     n_edges: usize,
     n_runs: usize,
     e: &super::lf::Edges,
     bit_depth: u32,
 ) {
-    super::lf::edges_simd::<V16x8>(buf, stride, x0, y0, vertical, n_edges, n_runs, e, bit_depth);
+    super::lf::edges_simd::<V16x8>(
+        buf, stride, x0, y0, vertical, first, n_edges, n_runs, e, bit_depth,
+    );
 }
 
 // ---------------------------------------------------------------------

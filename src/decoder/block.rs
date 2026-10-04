@@ -121,6 +121,12 @@ pub(crate) struct FrameDec<'a> {
     pub pred_buf: Vec<u16>,
 }
 
+impl Drop for FrameDec<'_> {
+    fn drop(&mut self) {
+        super::pool::give_modes(std::mem::take(&mut self.mi));
+    }
+}
+
 /// Probability of node `node` of the token tree (pareto, 9.3.2).
 #[inline]
 pub(crate) fn pareto(node: usize, prob: u8) -> u8 {
@@ -179,9 +185,10 @@ impl<'a> FrameDec<'a> {
         let w = ((sb_end - col_start) * 8) as usize;
         let ht = (h.sb64_rows * 64) as usize;
         let (sx, sy) = (h.subsampling_x as usize, h.subsampling_y as usize);
-        let plane = |w: usize, h: usize, x0: usize| PlaneBuf {
-            x0,
-            ..PlaneBuf::new(w, h)
+        let plane = |w: usize, h: usize, x0: usize| {
+            let mut p = PlaneBuf::new(w, h);
+            p.x0 = x0;
+            p
         };
         let planes = [
             plane(w, ht, x0),
@@ -200,7 +207,7 @@ impl<'a> FrameDec<'a> {
             prev_mvs,
             refs,
             planes,
-            mi: vec![MiInfo::default(); (h.mi_rows * mi_stride) as usize],
+            mi: super::pool::modes((h.mi_rows * mi_stride) as usize),
             mi_stride,
             mi_x0: col_start,
             mi_cols: h.mi_cols,
@@ -229,8 +236,11 @@ impl<'a> FrameDec<'a> {
         }
     }
 
-    pub(crate) fn finish(self) -> ([PlaneBuf; 3], Vec<MiInfo>) {
-        (self.planes, self.mi)
+    pub(crate) fn finish(mut self) -> ([PlaneBuf; 3], Vec<MiInfo>) {
+        (
+            std::mem::take(&mut self.planes),
+            std::mem::take(&mut self.mi),
+        )
     }
 
     /// decode_tiles( sz ) (6.4).
@@ -1551,7 +1561,7 @@ pub(crate) fn assemble(
         PlaneBuf::new(w >> sx, ht >> sy),
         PlaneBuf::new(w >> sx, ht >> sy),
     ];
-    let mut mi = vec![MiInfo::default(); (h.mi_rows * h.mi_cols) as usize];
+    let mut mi = super::pool::modes((h.mi_rows * h.mi_cols) as usize);
     for (col, cplanes, cmi) in columns {
         for (dst, src) in planes.iter_mut().zip(&cplanes) {
             let cw = src.stride;
@@ -1574,6 +1584,7 @@ pub(crate) fn assemble(
                 drow[start..end].copy_from_slice(srow);
             }
         }
+        super::pool::give_modes(cmi);
     }
     (planes, mi)
 }
