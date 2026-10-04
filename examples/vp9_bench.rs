@@ -1,10 +1,10 @@
 //! End-to-end throughput: decoding and encoding, frames per second.
 //!
 //! ```text
-//! cargo run --release --example bench -- dec  FILE.{ivf,webm} [--threads N] [--runs R]
-//! cargo run --release --example bench -- enc  SRC.yuv W H [--frames N] [--q Q] [--speed S]
+//! cargo run --release --example vp9_bench -- dec  FILE.{ivf,webm} [--threads N] [--runs R]
+//! cargo run --release --example vp9_bench -- enc  SRC.yuv W H [--frames N] [--q Q] [--speed S]
 //!                                             [--threads N] [--runs R] [--out OUT.ivf]
-//! cargo run --release --example bench -- yuv  FILE.{ivf,webm} OUT.yuv [--crop WxH]
+//! cargo run --release --example vp9_bench -- yuv  FILE.{ivf,webm} OUT.yuv [--crop WxH]
 //! ```
 //!
 //! `dec` decodes the whole file `R` times (default 5) and reports the

@@ -15,8 +15,8 @@ cd "$(dirname "$0")/.."
 work=${1:-target/bench}
 runs=${2:-5}
 mkdir -p "$work"
-cargo build --release --example bench
-b=target/release/examples/bench
+cargo build --release --example vp9_bench
+b=target/release/examples/vp9_bench
 vec=tests/vectors/vp90-2-02-size-lf-1920x1080.webm
 [ -s "$work/src1080.yuv" ] || $b yuv "$vec" "$work/src1080.yuv"
 [ -s "$work/src720.yuv" ] || $b yuv "$vec" "$work/src720.yuv" --crop 1280x720

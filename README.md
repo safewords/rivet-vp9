@@ -375,9 +375,9 @@ cfg.two_pass = Some(first.finish());
 
 `vp9::ivf` reads and writes IVF; `vp9::superframe` splits and builds
 superframes. The examples decode IVF to raw planar video with per-frame
-MD5s (`cargo run --release --example ivfdec -- in.ivf out.yuv`) and encode
+MD5s (`cargo run --release --example vp9_ivfdec -- in.ivf out.yuv`) and encode
 raw planar video to IVF at a quantiser or a bitrate (two-pass), any bit
-depth and chroma format (`--example ivfenc -- in.yuv 352 288 out.ivf 60`,
+depth and chroma format (`--example vp9_ivfenc -- in.yuv 352 288 out.ivf 60`,
 `… out.ivf 500k 10 444`).
 
 ## Specification notes

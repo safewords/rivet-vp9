@@ -1,7 +1,7 @@
 //! Decodes an IVF file to raw planar video (Y, U, V per frame; 16-bit
 //! little-endian samples above 8 bits) and prints each frame's MD5.
 //!
-//! cargo run --release --example ivfdec -- input.ivf [output.yuv]
+//! cargo run --release --example vp9_ivfdec -- input.ivf [output.yuv]
 
 use std::io::Write;
 

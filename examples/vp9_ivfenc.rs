@@ -1,7 +1,7 @@
 //! Encodes raw planar video (Y, U, V per frame; 8-bit samples one byte
 //! each, 10 / 12-bit little-endian u16) to IVF.
 //!
-//! cargo run --release --example ivfenc -- input.yuv WIDTH HEIGHT output.ivf [RATE] [BITS] [CHROMA]
+//! cargo run --release --example vp9_ivfenc -- input.yuv WIDTH HEIGHT output.ivf [RATE] [BITS] [CHROMA]
 //!
 //! RATE is a quantiser 0-255 (default 64) or a bitrate such as `500k`
 //! (two-pass); BITS is 8, 10 or 12 (default 8); CHROMA is 420, 422, 440 or
