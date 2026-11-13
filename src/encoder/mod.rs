@@ -659,8 +659,8 @@ impl Encoder {
             // show_frame is 1, so intra_only is not coded; error resilient,
             // so reset_frame_context is not either.
             w.f(8, h.refresh_frame_flags as u32);
-            for i in 0..3 {
-                w.f(3, h.ref_frame_idx[i] as u32);
+            for &idx in &h.ref_frame_idx {
+                w.f(3, idx as u32);
                 w.f(1, 0); // ref_frame_sign_bias
             }
             w.f(1, 1); // found_ref: the size of LAST
